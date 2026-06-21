@@ -1,52 +1,100 @@
-# NetBox Custom Objects
+# netbox-custom-objects (Prototyp)
 
-This [NetBox](https://netboxlabs.com/products/netbox/) plugin introduces the ability to create new object types in NetBox so that users can add models to suit their own needs. NetBox users have been able to extend the NetBox data model for some time using both Tags & Custom Fields and Plugins. Tags and Custom Fields are easy to use, but they have limitations when used at scale, and Plugins are very powerful but require Python/Django knowledge, and ongoing maintenance. Custom Objects provides users with a no-code "sweet spot" for data model extensibility, providing a lot of the power of NetBox plugins, but with the ease of use of Tags and Custom Fields.
+> **Technologie-Prototyp — ohne Gewähr**
+>
+> Dieses Repository ist **kein** offizielles [NetBox Labs](https://github.com/netboxlabs/netbox-custom-objects)-Release.
+> Es ist ein **Technologie-Prototyp**, der Ideen für Erweiterungen des Custom-Objects-Plugins
+> demonstrieren soll (COT-Metadaten, Related Tabs, portable Schema-UI, **COT Views**, **Local Bundles**).
+>
+> Es wird **nicht** fehlerfrei betrieben, **legt keinen Anspruch** auf Vollständigkeit,
+> Stabilität oder Produktionsreife und soll **so nicht** in NetBox Labs oder produktiv
+> übernommen werden. Nutzung auf eigenes Risiko.
+>
+> **Beispiel-Bundles** (Security, IPAM Tree, Cisco-Demos) liegen in einem separaten Repo:
+> [github.com/christianbur/netbox-custom-objects-bundels](https://github.com/christianbur/netbox-custom-objects-bundels)
 
-You can find further documentation [here](https://github.com/netboxlabs/netbox-custom-objects/blob/main/docs/index.md). See the [compatibility matrix](COMPATIBILITY.md) for supported NetBox versions.
+---
 
-## Installation
+## Was dieser Prototyp zeigt
 
-1. Install the NetBox Custom Objects package.
+Auf Basis eines NetBox-Labs-Standes (Custom Objects mit Related Tabs) erweitert der Fork
+u. a.:
 
+| Bereich | Kurzbeschreibung |
+|---------|------------------|
+| **COT-Metadaten** | Felder `link_table`, `menu_name`, `metadata` am Custom Object Type |
+| **Related Tabs** | Outgoing-Referenzen, Junction-Tabellen-Traversal, getrennte Tabs pro `menu_name` |
+| **Feldgruppen** | Sections nach Display-Weight statt alphabetisch nach Gruppenname |
+| **Portable Schema UI** | Export-Tab und Define-via-Text (JSON/YAML) im Plugin |
+| **COT Views** | Registrierbare Zusatz-Tabs/Proxy-Listen pro COT (`views`-Feld) |
+| **Local Bundles** | Drop-in-Pakete unter `bundles_path` (Default `/opt/netbox/local`) mit GUI-Aktivierung |
+| **`object_proxy`** | COT-Feldtyp: Listenseite zeigt Instanzen eines referenzierten Typs |
+| **Branching** | Zusätzliche Hooks, wenn `netbox_branching` installiert ist |
+
+Ausführliche technische Notizen:
+
+- [`PROTOTYPE_COT_ENHANCEMENTS.md`](PROTOTYPE_COT_ENHANCEMENTS.md) — COT-Felder, Related Tabs, Navigation, Schema-UI
+- [`docs/bundle-validation-plan.md`](docs/bundle-validation-plan.md) — Validierungsstrategie für Bundle-Schemas
+
+## Beispiel-Bundles
+
+Die lauffähigen Demos binden **Bundles** aus dem Companion-Repo ein:
+
+```bash
+git clone https://github.com/christianbur/netbox-custom-objects-bundels.git /opt/netbox/local
 ```
-pip install netboxlabs-netbox-custom-objects
+
+Dort u. a. `security/` (Policy-COTs, Rulebook-, Matrix- und IP-Analyzer-Views),
+`ipam_tree/`, `cisco_aci/`, `cisco_catalyst_center/`, `cisco_meraki/`.
+
+Nach dem Klon: Bundles in NetBox unter **Plugins → Custom Objects → Bundles** aktivieren,
+Worker **neu starten**.
+
+## Installation (Prototyp)
+
+**Nicht** `pip install netboxlabs-netbox-custom-objects` — dieser Fork weicht upstream ab.
+
+```bash
+git clone https://github.com/christianbur/netbox-custom-objects.git
+cd netbox-custom-objects
+pip install -e .
 ```
 
-2. Add `netbox_custom_objects` to `PLUGINS` in `configuration.py`.
+`configuration.py`:
 
 ```python
 PLUGINS = [
     # ...
-    'netbox_custom_objects',
+    "netbox_custom_objects",
 ]
+
+PLUGINS_CONFIG = {
+    "netbox_custom_objects": {
+        "bundles_path": "/opt/netbox/local",
+    },
+}
 ```
 
-3. Run NetBox migrations:
+`PYTHONPATH` muss das Bundle-Root enthalten (z. B. `/opt/netbox/local`), damit Bundle-Pakete
+importierbar sind.
 
-```
-$ ./manage.py migrate
-```
-
-4. Restart NetBox
-```
-sudo systemctl restart netbox netbox-rq
+```bash
+./manage.py migrate netbox_custom_objects
+# NetBox + Worker neu starten
 ```
 
-## Related Objects Tab
+## Migrations (0015–0020)
 
-When a Custom Object Type has an Object or Multi-object field that points at another model — a built-in NetBox model such as Device or Site, or another Custom Object Type — a **Custom Objects** tab is added to the detail page of every referenced object. The tab lists all custom objects that link to the object being viewed, across every referencing field and type, with:
+Neue Migrationen u. a. für `link_table` / `menu_name` / `metadata`, COT-`views`, Model
+`Bundle`, Feldtyp `object_proxy`. Nach Pull immer `migrate` ausführen.
 
-- a badge showing the linked-object count (the tab hides itself when there are none),
-- search, plus type and tag filters, and sortable columns,
-- HTMX-driven pagination and per-user column configuration,
-- per-row edit/delete actions.
+## Upstream
 
-Discovery is automatic and requires no configuration; both non-polymorphic and polymorphic Object/Multi-object fields are supported. The tab supersedes the older "Custom Objects linking to this object" panel — it surfaces the same relationships and, unlike the panel, enforces per-Custom-Object-Type view permissions on the rows it lists.
+Ursprung und produktionsreife Dokumentation:
 
-The tab is fully live: no NetBox restart is needed for any everyday change. Defining a new Custom Object Type, adding a field that references a model nothing referenced before, and creating, editing, or deleting custom objects are all reflected on the next page load.
+- [netboxlabs/netbox-custom-objects](https://github.com/netboxlabs/netbox-custom-objects)
+- [docs/index.md](docs/index.md) (teilweise noch Labs-Text; Prototyp-Teile siehe oben)
 
-> **Note:** the badge count is filtered to the viewing user's permissions, so it reflects the rows that user can actually open — and the tab hides itself entirely when the user may view none of the linked objects.
+## Lizenz
 
-## Known Limitations
-
-NetBox Custom Objects is now Generally Available which means you can use it in production and migrations to future versions will work. There are many upcoming features including GraphQL support - the best place to see what's on the way is the [issues](https://github.com/netboxlabs/netbox-custom-objects/issues) list on the GitHub repository.
+Wie upstream — siehe [`LICENSE.md`](LICENSE.md).
