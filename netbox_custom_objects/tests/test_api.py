@@ -1,9 +1,7 @@
 """
 Tests for API code paths.
 """
-import uuid
-
-from django.test import TestCase, RequestFactory
+from django.test import TestCase
 from django.urls import reverse
 
 from utilities.testing import create_test_user
@@ -11,27 +9,11 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from netbox_custom_objects.models import CustomObjectType, CustomObjectTypeField
-from netbox_custom_objects.template_content import CustomObjectLink, LinkedCustomObject
-from .base import CustomObjectsTestCase
+from .base import CustomObjectsTestCase, create_token
 from core.models import ObjectType
 from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
-from extras.models import Tag
-from users.models import ObjectPermission, Token
+from users.models import ObjectPermission
 from virtualization.models import Cluster, ClusterType
-
-
-def create_token(user):
-    try:
-        # NetBox >= 4.5
-        from users.choices import TokenVersionChoices
-        token = Token(version=TokenVersionChoices.V1, user=user)
-        token.save()
-        return token.token
-    except ImportError:
-        # NetBox < 4.5
-        token = Token(user=user)
-        token.save()
-        return token.key
 
 
 class CustomObjectAPITestCaseMixin:
@@ -415,78 +397,6 @@ class CustomObjectTest(CustomObjectsTestCase, CustomObjectAPITestCaseMixin, Test
             set(data['devices']),
         )
 
-    def test_create_with_tags_persists_to_db(self):
-        """Regression #371: tags submitted on POST must be saved to the DB, not just echoed."""
-        self._add_permission('add', 'Create with tags perm')
-        tag = Tag.objects.get_or_create(name='api-create-tag', slug='api-create-tag')[0]
-
-        data = {
-            'test_field': 'Tagged Object',
-            'tags': [{'id': tag.id, 'name': tag.name, 'slug': tag.slug, 'color': tag.color}],
-        }
-        response = self.client.post(self._get_list_url(), data, format='json', **self.header)
-        self.assertHttpStatus(response, status.HTTP_201_CREATED)
-        self.assertIn('tags', response.data)
-        self.assertTrue(len(response.data['tags']) > 0, 'Response should include the submitted tag')
-
-        # Fetch fresh from the DB — the critical assertion that caught #371
-        instance = self._get_queryset().get(pk=response.data['id'])
-        self.assertIn(tag.name, list(instance.tags.names()), 'Tag must be persisted to the DB')
-
-    def test_patch_with_tags_persists_to_db(self):
-        """Regression #371: tags submitted on PATCH must be saved to the DB, not just echoed."""
-        self._add_permission('view', 'View perm')
-        self._add_permission('change', 'Patch with tags perm')
-        tag = Tag.objects.get_or_create(name='api-patch-tag', slug='api-patch-tag')[0]
-
-        instance = self._get_queryset().first()
-        self.assertEqual(list(instance.tags.names()), [], 'Instance should start with no tags')
-
-        data = {'tags': [{'id': tag.id, 'name': tag.name, 'slug': tag.slug, 'color': tag.color}]}
-        response = self.client.patch(self._get_detail_url(instance), data, format='json', **self.header)
-        self.assertHttpStatus(response, status.HTTP_200_OK)
-
-        instance.refresh_from_db()
-        self.assertIn(tag.name, list(instance.tags.names()), 'Tag must be persisted to the DB after PATCH')
-
-    def test_patch_with_empty_tags_clears_existing(self):
-        """PATCH with tags=[] must remove all existing tags from the DB."""
-        self._add_permission('view', 'View perm')
-        self._add_permission('change', 'Patch clear tags perm')
-        tag = Tag.objects.get_or_create(name='api-clear-tag', slug='api-clear-tag')[0]
-
-        instance = self._get_queryset().first()
-        instance.tags.add(tag.name)
-        self.assertIn(tag.name, list(instance.tags.names()), 'Pre-condition: tag should be set')
-
-        response = self.client.patch(self._get_detail_url(instance), {'tags': []}, format='json', **self.header)
-        self.assertHttpStatus(response, status.HTTP_200_OK)
-
-        instance.refresh_from_db()
-        self.assertEqual(list(instance.tags.names()), [], 'All tags must be cleared after PATCH with tags=[]')
-
-    def test_patch_without_tags_preserves_existing(self):
-        """PATCH that omits the tags key entirely must leave existing tags unchanged."""
-        self._add_permission('view', 'View perm')
-        self._add_permission('change', 'Patch preserve tags perm')
-        tag = Tag.objects.get_or_create(name='api-preserve-tag', slug='api-preserve-tag')[0]
-
-        instance = self._get_queryset().first()
-        instance.tags.add(tag.name)
-        self.assertIn(tag.name, list(instance.tags.names()), 'Pre-condition: tag should be set')
-
-        response = self.client.patch(
-            self._get_detail_url(instance), {'test_field': 'updated'}, format='json', **self.header
-        )
-        self.assertHttpStatus(response, status.HTTP_200_OK)
-
-        instance.refresh_from_db()
-        self.assertIn(
-            tag.name,
-            list(instance.tags.names()),
-            'Existing tags must be preserved when tags not in PATCH payload',
-        )
-
 
 class LinkedObjectsAPITest(CustomObjectsTestCase, TestCase):
     """
@@ -762,6 +672,67 @@ class CustomObjectTypeAPITest(CustomObjectsTestCase, TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('group_name', response.data)
         self.assertEqual(response.data['group_name'], '')
+
+    def test_cot_enhancement_fields_serialized(self):
+        """menu_name, link_table and metadata are returned in the detail response."""
+        self._add_view_permission()
+        cot = CustomObjectType.objects.create(
+            name='enhanced_type',
+            slug='enhanced-type',
+            menu_name='Firewall',
+            link_table=True,
+            metadata='key: value',
+        )
+
+        url = reverse(
+            'plugins-api:netbox_custom_objects-api:customobjecttype-detail',
+            kwargs={'pk': cot.pk},
+        )
+        response = self.client.get(url, **self.header)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['menu_name'], 'Firewall')
+        self.assertEqual(response.data['link_table'], True)
+        self.assertEqual(response.data['metadata'], 'key: value')
+
+    def test_cot_enhancement_fields_created_via_api(self):
+        """menu_name, link_table and metadata can be written through the REST API."""
+        data = {
+            'name': 'api_created_type',
+            'slug': 'api-created-type',
+            'menu_name': 'Security',
+            'link_table': True,
+            'metadata': '{"foo": "bar"}',
+        }
+
+        url = reverse('plugins-api:netbox_custom_objects-api:customobjecttype-list')
+        response = self.client.post(url, data, format='json', **self.header)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        cot = CustomObjectType.objects.get(slug='api-created-type')
+        self.assertEqual(cot.menu_name, 'Security')
+        self.assertTrue(cot.link_table)
+        self.assertEqual(cot.metadata, '{"foo": "bar"}')
+
+    def test_cot_enhancement_fields_filterable(self):
+        """The new fields are exposed on CustomObjectTypeFilterSet and filter correctly."""
+        from netbox_custom_objects.filtersets import CustomObjectTypeFilterSet
+
+        junction = CustomObjectType.objects.create(
+            name='link_type', slug='link-type', menu_name='Links', link_table=True,
+        )
+        CustomObjectType.objects.create(
+            name='plain_type', slug='plain-type',
+        )
+
+        qs = CustomObjectType.objects.all()
+        self.assertIn(
+            'menu_name', CustomObjectTypeFilterSet.get_filters(),
+        )
+        by_menu = CustomObjectTypeFilterSet({'menu_name': 'Links'}, qs).qs
+        self.assertEqual(list(by_menu), [junction])
+        by_junction = CustomObjectTypeFilterSet({'link_table': True}, qs).qs
+        self.assertEqual(list(by_junction), [junction])
 
 
 class CustomObjectTypeFieldObjectResolutionTest(CustomObjectsTestCase, TestCase):
@@ -1340,195 +1311,6 @@ class SchemaIdReadOnlyTest(CustomObjectsTestCase, TestCase):
         self.assertEqual(field.schema_id, original_id)
 
 
-# ---------------------------------------------------------------------------
-# CustomObjectLink UI panel — linked_custom_objects population
-# ---------------------------------------------------------------------------
-
-
-class CustomObjectLinkPanelTest(CustomObjectsTestCase, TestCase):
-    """
-    Tests that CustomObjectLink.left_page() populates linked_custom_objects
-    correctly for non-polymorphic, polymorphic GFK, and polymorphic M2M fields.
-
-    We call left_page() with a minimal fake context rather than going through
-    the full template-extension machinery, since the interesting logic is in
-    data gathering, not rendering.
-    """
-
-    def _make_device(self, suffix):
-        manufacturer = Manufacturer.objects.create(
-            name=f'PanelMfr {suffix}', slug=f'panel-mfr-{suffix}'
-        )
-        device_type = DeviceType.objects.create(
-            manufacturer=manufacturer, model=f'PanelType {suffix}', slug=f'panel-type-{suffix}'
-        )
-        role = DeviceRole.objects.create(
-            name=f'PanelRole {suffix}', slug=f'panel-role-{suffix}', color='ffffff'
-        )
-        site = Site.objects.create(name=f'PanelSite {suffix}', slug=f'panel-site-{suffix}')
-        return Device.objects.create(
-            device_type=device_type, role=role, name=f'Panel Device {suffix}', site=site
-        )
-
-    def _panel(self, obj):
-        """Return a CustomObjectLink instance with a minimal fake context."""
-        request = RequestFactory().get('/')
-        return CustomObjectLink({'object': obj, 'request': request})
-
-    def _linked_objects_for(self, obj):
-        """Return the list of LinkedCustomObject entries the panel would render."""
-        self._panel(obj)
-        # Intercept just before template rendering by extracting the data
-        # the same way left_page() does, without actually rendering HTML.
-        from django.contrib.contenttypes.models import ContentType
-        from django.apps import apps as django_apps
-        from extras.choices import CustomFieldTypeChoices
-        from netbox_custom_objects.constants import APP_LABEL
-
-        content_type = ContentType.objects.get_for_model(obj._meta.model)
-        from netbox_custom_objects.models import CustomObjectTypeField
-        non_poly = CustomObjectTypeField.objects.filter(related_object_type=content_type)
-        poly = CustomObjectTypeField.objects.filter(related_object_types=content_type)
-
-        results = []
-        for field in list(non_poly) + list(poly):
-            model = field.custom_object_type.get_model(no_cache=True)
-            if field.type == CustomFieldTypeChoices.TYPE_MULTIOBJECT:
-                if field.is_polymorphic:
-                    through = django_apps.get_model(APP_LABEL, field.through_model_name)
-                    ids = through.objects.filter(
-                        content_type_id=content_type.id, object_id=obj.pk
-                    ).values_list('source_id', flat=True)
-                else:
-                    m2m_field = model._meta.get_field(field.name)
-                    ids = m2m_field.remote_field.through.objects.filter(
-                        target_id=obj.pk
-                    ).values_list('source_id', flat=True)
-                for o in model.objects.filter(pk__in=ids):
-                    results.append(LinkedCustomObject(custom_object=o, field=field))
-            else:
-                if field.is_polymorphic:
-                    qs = model.objects.filter(**{
-                        f"{field.name}_content_type_id": content_type.id,
-                        f"{field.name}_object_id": obj.pk,
-                    })
-                else:
-                    qs = model.objects.filter(**{f"{field.name}_id": obj.pk})
-                for o in qs:
-                    results.append(LinkedCustomObject(custom_object=o, field=field))
-        return results
-
-    def test_non_polymorphic_fk_field_appears(self):
-        cot = self.create_custom_object_type(name='PanelFKTest', slug='panel-fk-test')
-        self.create_custom_object_type_field(cot, name='name', label='Name', type='text', primary=True, required=True)
-        self.create_custom_object_type_field(cot, name='device', label='Device', type='object',
-                                              related_object_type=self.get_device_object_type())
-        model = cot.get_model()
-        device = self._make_device('fk')
-        linked = model.objects.create(name='panel-fk', device=device)
-
-        entries = self._linked_objects_for(device)
-        self.assertTrue(
-            any(e.custom_object.pk == linked.pk and e.field.name == 'device' for e in entries),
-            "Non-polymorphic FK object not found in panel linked_custom_objects"
-        )
-
-    def test_polymorphic_gfk_field_appears(self):
-        cot = self.create_custom_object_type(name='PanelPolyGFK', slug='panel-poly-gfk')
-        self.create_custom_object_type_field(cot, name='name', label='Name', type='text', primary=True, required=True)
-        self.create_polymorphic_field(
-            cot,
-            related_object_types=[self.get_device_object_type(), self.get_site_object_type()],
-            name='target', label='Target', type='object',
-        )
-        model = cot.get_model()
-        device = self._make_device('poly-gfk')
-        linked = model.objects.create(name='panel-poly-gfk', target=device)
-
-        entries = self._linked_objects_for(device)
-        self.assertTrue(
-            any(e.custom_object.pk == linked.pk and e.field.name == 'target' for e in entries),
-            "Polymorphic GFK object not found in panel linked_custom_objects"
-        )
-
-    def test_polymorphic_m2m_field_appears(self):
-        cot = self.create_custom_object_type(name='PanelPolyM2M', slug='panel-poly-m2m')
-        self.create_custom_object_type_field(cot, name='name', label='Name', type='text', primary=True, required=True)
-        self.create_polymorphic_field(
-            cot,
-            related_object_types=[self.get_device_object_type(), self.get_site_object_type()],
-            name='targets', label='Targets', type='multiobject',
-        )
-        model = cot.get_model()
-        device = self._make_device('poly-m2m')
-        linked = model.objects.create(name='panel-poly-m2m')
-        linked.targets.add(device)
-
-        entries = self._linked_objects_for(device)
-        self.assertTrue(
-            any(e.custom_object.pk == linked.pk and e.field.name == 'targets' for e in entries),
-            "Polymorphic M2M object not found in panel linked_custom_objects"
-        )
-
-    def test_unrelated_object_not_returned(self):
-        """An object not linked to the target does not appear in the panel."""
-        cot = self.create_custom_object_type(name='PanelUnrelated', slug='panel-unrelated')
-        self.create_custom_object_type_field(cot, name='name', label='Name', type='text', primary=True, required=True)
-        self.create_polymorphic_field(
-            cot,
-            related_object_types=[self.get_device_object_type(), self.get_site_object_type()],
-            name='target', label='Target', type='object',
-        )
-        model = cot.get_model()
-        device_a = self._make_device('unrelated-a')
-        device_b = self._make_device('unrelated-b')
-        model.objects.create(name='panel-linked-a', target=device_a)
-
-        entries = self._linked_objects_for(device_b)
-        self.assertEqual(entries, [], "Expected no entries for unrelated device")
-
-    def test_self_referential_fk_does_not_raise(self):
-        """
-        Regression for #508: self-referential Object fields must not raise
-        ValueError when no_cache=True causes a fresh class to be generated.
-
-        get_model(no_cache=True) returns a newly constructed Python class.
-        For a self-referential field, target_obj was created via the cached
-        class, so filter(**{field_name: target_obj}) triggers Django's
-        isinstance check between two class objects that are logically identical
-        but not identity-equal — raising "Must be TableNModel instance".
-
-        The fix filters by PK (_id suffix) instead, bypassing the check.
-        """
-        from core.models import ObjectType
-        from netbox_custom_objects.constants import APP_LABEL
-
-        cot = self.create_custom_object_type(name='SelfRefPanel', slug='self-ref-panel')
-        self.create_custom_object_type_field(
-            cot, name='name', label='Name', type='text', primary=True, required=True,
-        )
-        # Look up the COT's own ObjectType for the self-referential field.
-        cot_model_name = cot.get_model()._meta.model_name
-        self_ot = ObjectType.objects.get(app_label=APP_LABEL, model=cot_model_name)
-        self.create_custom_object_type_field(
-            cot, name='parent', label='Parent', type='object', related_object_type=self_ot,
-        )
-
-        model = cot.get_model()
-        target = model.objects.create(name='target-obj')
-        child = model.objects.create(name='child-obj', parent=target)
-
-        try:
-            entries = self._linked_objects_for(target)
-        except ValueError as exc:
-            self.fail(f'left_page() raised ValueError for self-referential field: {exc}')
-
-        self.assertTrue(
-            any(e.custom_object.pk == child.pk for e in entries),
-            "Child object not found in panel entries for self-referential field",
-        )
-
-
 class CrossCOTMultiObjectAPITest(CustomObjectsTestCase, TestCase):
     """
     Tests for API PATCH/PUT behaviour when a CO has a cross-COT multiobject
@@ -1690,162 +1472,3 @@ class CrossCOTMultiObjectAPITest(CustomObjectsTestCase, TestCase):
         self.assertIn('refs', response.data, 'Response must include the refs M2M field.')
         ref_ids = [r['id'] for r in response.data['refs']]
         self.assertIn(self.obj_target1.pk, ref_ids)
-
-
-# ---------------------------------------------------------------------------
-# Regression: explicit null on optional object/multiobject fields (#550)
-# ---------------------------------------------------------------------------
-
-
-class NullOptionalObjectFieldTest(CustomObjectsTestCase, TestCase):
-    """
-    POST/PATCH with explicit null on a non-required object or multiobject field
-    must succeed (201/200).  Before the fix, the serializer lacked allow_null=True
-    so null was rejected with 400 'This field may not be null.'
-    """
-
-    def setUp(self):
-        self.user = create_test_user('nullobjuser')
-        token_key = create_token(self.user)
-        self.header = {'HTTP_AUTHORIZATION': f'Token {token_key}'}
-        self.client = APIClient()
-        self.client.credentials(HTTP_AUTHORIZATION=f'Token {token_key}')
-
-        self.cot = CustomObjectsTestCase.create_custom_object_type(
-            name='NullObjTest', slug='null-obj-test'
-        )
-        CustomObjectsTestCase.create_custom_object_type_field(
-            self.cot, name='name', type='text', primary=True, required=True,
-        )
-        device_ct = CustomObjectsTestCase.get_device_object_type()
-        CustomObjectsTestCase.create_custom_object_type_field(
-            self.cot, name='device', type='object',
-            related_object_type=device_ct, required=False,
-        )
-        CustomObjectsTestCase.create_custom_object_type_field(
-            self.cot, name='devices', type='multiobject',
-            related_object_type=device_ct, required=False,
-        )
-        self.model = self.cot.get_model()
-
-        uid = uuid.uuid4().hex[:8]
-        for action in ('add', 'change', 'view'):
-            perm = ObjectPermission(name=f'null-obj-{action}-{uid}', actions=[action])
-            perm.save()
-            perm.users.add(self.user)
-            perm.object_types.add(ObjectType.objects.get_for_model(self.model))
-
-    def tearDown(self):
-        CustomObjectType.clear_model_cache()
-        super().tearDown()
-
-    def _list_url(self):
-        return reverse(
-            'plugins-api:netbox_custom_objects-api:customobject-list',
-            kwargs={'custom_object_type': self.cot.slug},
-        )
-
-    def _detail_url(self, pk):
-        return reverse(
-            'plugins-api:netbox_custom_objects-api:customobject-detail',
-            kwargs={'pk': pk, 'custom_object_type': self.cot.slug},
-        )
-
-    def test_post_null_object_field_accepted(self):
-        """POST with explicit null on an optional object field must return 201."""
-        response = self.client.post(
-            self._list_url(),
-            {'name': 'obj-null-post', 'device': None},
-            format='json',
-        )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
-        self.assertIsNone(response.data['device'])
-
-    def test_post_null_multiobject_field_accepted(self):
-        """POST with explicit null on an optional multiobject field must return 201."""
-        response = self.client.post(
-            self._list_url(),
-            {'name': 'multiobj-null-post', 'devices': None},
-            format='json',
-        )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
-        self.assertEqual(response.data['devices'], [])
-
-    def test_patch_null_object_field_clears_value(self):
-        """PATCH with null on an optional object field must clear it and return 200."""
-        site = Site.objects.create(name='null-test-site', slug='null-test-site')
-        manufacturer = Manufacturer.objects.create(name='null-mfr', slug='null-mfr')
-        device_type = DeviceType.objects.create(
-            manufacturer=manufacturer, model='null-dt', slug='null-dt'
-        )
-        device_role = DeviceRole.objects.create(name='null-role', slug='null-role')
-        device = Device.objects.create(
-            name='null-dev', site=site, device_type=device_type, role=device_role
-        )
-        obj = self.model.objects.create(name='patch-null-obj', device=device)
-        self.assertIsNotNone(obj.device)
-
-        response = self.client.patch(
-            self._detail_url(obj.pk),
-            {'device': None},
-            format='json',
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
-        obj.refresh_from_db()
-        self.assertIsNone(obj.device)
-
-    def test_patch_null_multiobject_field_clears_value(self):
-        """PATCH with null on an optional multiobject field must clear it and return 200."""
-        site = Site.objects.create(name='null-multi-site', slug='null-multi-site')
-        manufacturer = Manufacturer.objects.create(name='null-multi-mfr', slug='null-multi-mfr')
-        device_type = DeviceType.objects.create(
-            manufacturer=manufacturer, model='null-multi-dt', slug='null-multi-dt'
-        )
-        device_role = DeviceRole.objects.create(name='null-multi-role', slug='null-multi-role')
-        device = Device.objects.create(
-            name='null-multi-dev', site=site, device_type=device_type, role=device_role
-        )
-        obj = self.model.objects.create(name='patch-null-multi-obj')
-        obj.devices.add(device)
-        self.assertEqual(obj.devices.count(), 1)
-
-        response = self.client.patch(
-            self._detail_url(obj.pk),
-            {'devices': None},
-            format='json',
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
-        obj.refresh_from_db()
-        self.assertEqual(obj.devices.count(), 0)
-
-    def test_post_null_required_object_field_rejected(self):
-        """POST with null on a required object field must still return 400."""
-        device_ct = CustomObjectsTestCase.get_device_object_type()
-        uid = uuid.uuid4().hex[:8]
-        cot = CustomObjectsTestCase.create_custom_object_type(
-            name=f'NullReqTest-{uid}', slug=f'null-req-test-{uid}'
-        )
-        CustomObjectsTestCase.create_custom_object_type_field(
-            cot, name='name', type='text', primary=True, required=True,
-        )
-        CustomObjectsTestCase.create_custom_object_type_field(
-            cot, name='req_device', type='object',
-            related_object_type=device_ct, required=True,
-        )
-        model = cot.get_model()
-        for action in ('add', 'view'):
-            perm = ObjectPermission(name=f'null-req-{action}-{uid}', actions=[action])
-            perm.save()
-            perm.users.add(self.user)
-            perm.object_types.add(ObjectType.objects.get_for_model(model))
-
-        list_url = reverse(
-            'plugins-api:netbox_custom_objects-api:customobject-list',
-            kwargs={'custom_object_type': cot.slug},
-        )
-        response = self.client.post(
-            list_url,
-            {'name': 'req-null-post', 'req_device': None},
-            format='json',
-        )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)

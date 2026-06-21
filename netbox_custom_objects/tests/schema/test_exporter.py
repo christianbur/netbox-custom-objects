@@ -102,6 +102,28 @@ class ExporterBasicTestCase(CustomObjectsTestCase, TestCase):
                     "version", "group_name"):
             self.assertNotIn(key, cot_def)
 
+    def test_enhancement_attrs_included_when_set(self):
+        enhanced = self.create_custom_object_type(
+            name='enhanced', slug='enhanced',
+            link_table=True, menu_name='Firewall',
+            metadata='key: value\nother: 1',
+        )
+        cot_def = export_cot(enhanced)
+        self.assertEqual(cot_def["link_table"], True)
+        self.assertEqual(cot_def["menu_name"], "Firewall")
+        # metadata round-trips as the raw string, NOT parsed into a mapping.
+        self.assertEqual(cot_def["metadata"], "key: value\nother: 1")
+        self.assertIsInstance(cot_def["metadata"], str)
+
+    def test_enhancement_attrs_omitted_when_default(self):
+        plain = self.create_custom_object_type(
+            name='plainenh', slug='plain-enh',
+            link_table=False, menu_name='', metadata='',
+        )
+        cot_def = export_cot(plain)
+        for key in ("link_table", "menu_name", "metadata"):
+            self.assertNotIn(key, cot_def)
+
     def test_field_required_keys_present(self):
         f = _field_by_name(export_cot(self.cot), "label")
         self.assertIn("id", f)

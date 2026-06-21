@@ -1,0 +1,140 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load i18n %}
+
+{% block breadcrumbs %}
+  <li class="breadcrumb-item">
+    <a href="{% url 'plugins:netbox_custom_objects:bundle_list' %}">{% trans "Bundles" %}</a>
+  </li>
+{% endblock breadcrumbs %}
+
+{% block content %}
+  <div class="alert alert-info" role="alert">
+    <i class="mdi mdi-information-outline"></i>
+    {{ reload_hint }}
+  </div>
+  <div class="row">
+    <div class="col col-md-6">
+      <div class="card">
+        <h5 class="card-header">{% trans "Bundle" %}</h5>
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">{% trans "Display name" %}</th>
+            <td>{% if detail %}{{ detail.verbose_name }}{% else %}{{ object.name }}{% endif %}</td>
+          </tr>
+          <tr>
+            <th scope="row">{% trans "Name" %}</th>
+            <td><code>{{ object.name }}</code></td>
+          </tr>
+          <tr>
+            <th scope="row">{% trans "Package" %}</th>
+            <td>{% if detail %}<code>{{ detail.package }}</code>{% else %}{{ ''|placeholder }}{% endif %}</td>
+          </tr>
+          <tr>
+            <th scope="row">{% trans "Status" %}</th>
+            <td>
+              {% if object.enabled %}
+                <span class="badge text-bg-green">{% trans "Enabled" %}</span>
+              {% else %}
+                <span class="badge text-bg-grey">{% trans "Disabled" %}</span>
+              {% endif %}
+              {% if object.restart_required %}
+                <div class="small text-warning mt-1">
+                  <i class="mdi mdi-restart-alert"></i>
+                  {% trans "NetBox restart required" %} — {% trans "Restart NetBox workers to apply this change." %}
+                </div>
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">{% trans "Local path" %}</th>
+            <td>{% if detail %}<code>{{ detail.path }}</code>{% else %}{{ ''|placeholder }}{% endif %}</td>
+          </tr>
+          <tr>
+            <th scope="row">{% trans "Description" %}</th>
+            <td>{% if detail.manifest.description %}{{ detail.manifest.description }}{% else %}{{ ''|placeholder }}{% endif %}</td>
+          </tr>
+          <tr>
+            <th scope="row">{% trans "Last error" %}</th>
+            <td>{% if object.last_error %}<span class="text-danger">{{ object.last_error }}</span>{% else %}{{ ''|placeholder }}{% endif %}</td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="card">
+        <h5 class="card-header">{% trans "Provided views" %}</h5>
+        <table class="table table-hover">
+          <thead>
+            <tr>
+              <th>{% trans "Key" %}</th>
+              <th>{% trans "Label" %}</th>
+              <th>{% trans "Registered" %}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for view in detail.views %}
+              <tr>
+                <td><code>{{ view.key }}</code></td>
+                <td>{{ view.label }}</td>
+                <td>{% checkmark view.registered %}</td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="3" class="text-muted">{% trans "No COT views provided." %}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="col col-md-6">
+      {% if not detail %}
+        <div class="alert alert-warning" role="alert">
+          <i class="mdi mdi-alert-outline"></i>
+          {% trans "This bundle is no longer present on the local path; only its activation record is shown." %}
+        </div>
+      {% endif %}
+      {% for schema_file in detail.schema_files %}
+        <div class="card">
+          <h5 class="card-header"><i class="mdi mdi-file-code-outline"></i> <code>schema/{{ schema_file.filename }}</code></h5>
+          {% if schema_file.error %}
+            <div class="card-body"><span class="text-danger">{{ schema_file.error }}</span></div>
+          {% else %}
+            <table class="table table-hover">
+              <thead>
+                <tr>
+                  <th>{% trans "COT name" %}</th>
+                  <th>{% trans "Slug" %}</th>
+                  <th>{% trans "Readable name" %}</th>
+                  <th>{% trans "Views" %}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for type_def in schema_file.types %}
+                  <tr>
+                    <td><code>{{ type_def.name }}</code></td>
+                    <td><code>{{ type_def.slug }}</code></td>
+                    <td>{{ type_def.verbose_name|placeholder }}</td>
+                    <td>{% if type_def.views %}<code>{{ type_def.views }}</code>{% else %}{{ ''|placeholder }}{% endif %}</td>
+                  </tr>
+                {% empty %}
+                  <tr><td colspan="4" class="text-muted">{% trans "No COT types defined in this file." %}</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            <div class="card-body">
+              <details>
+                <summary class="text-muted">{% trans "Raw YAML" %}</summary>
+                <pre class="mt-2 mb-0"><code>{{ schema_file.raw }}</code></pre>
+              </details>
+            </div>
+          {% endif %}
+        </div>
+      {% empty %}
+        <div class="card">
+          <h5 class="card-header">{% trans "Schema files" %}</h5>
+          <div class="card-body"><span class="text-muted">{% trans "This bundle bundles no schema files." %}</span></div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+{% endblock %}

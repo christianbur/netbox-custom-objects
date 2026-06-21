@@ -38,6 +38,7 @@ from netbox_custom_objects import constants
 from netbox_custom_objects.models import CustomObjectType, CustomObjectTypeField
 from netbox_custom_objects.schema.comparator import FieldOp, diff_document
 from netbox_custom_objects.schema.format import (
+    COT_ATTR_DEFAULTS,
     CUSTOM_OBJECTS_APP_LABEL_SLUG,
     FIELD_BASE_ATTRS,
     FIELD_DEFAULTS,
@@ -449,6 +450,10 @@ def _phase1_cots(ordered_diffs, type_defs_by_slug) -> dict:
                 verbose_name_plural=type_def.get("verbose_name_plural", ""),
                 description=type_def.get("description", ""),
                 group_name=type_def.get("group_name", ""),
+                link_table=type_def.get("link_table", COT_ATTR_DEFAULTS["link_table"]),
+                menu_name=type_def.get("menu_name", COT_ATTR_DEFAULTS["menu_name"]),
+                metadata=type_def.get("metadata", COT_ATTR_DEFAULTS["metadata"]),
+                views=type_def.get("views", COT_ATTR_DEFAULTS["views"]),
             )
             cot.save()
             logger.info("Created new COT %r (slug=%r)", cot.name, cot.slug)

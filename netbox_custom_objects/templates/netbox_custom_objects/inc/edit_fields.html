@@ -5,7 +5,7 @@
 {# Render all custom object form fields with group headings and poly groupings. #}
 {# Used by both customobject_edit.html and the htmx/edit_fields.html partial. #}
 <div class="field-group mb-5">
-  {% for group, fields in form.custom_object_type_field_groups.items %}
+  {% for group, fields in form.custom_object_type_field_groups %}
     {% if group %}
     <div class="row">
       <h2 class="col-9 offset-3">{{ group }}</h2>

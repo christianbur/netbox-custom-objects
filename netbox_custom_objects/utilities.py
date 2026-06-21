@@ -13,7 +13,7 @@ __all__ = (
     "generate_model",
     "get_viewname",
     "install_clear_cache_suppressor",
-    "is_in_branch",
+    "restrict_to_viewable",
 )
 
 # ---------------------------------------------------------------------------
@@ -196,16 +196,48 @@ def generate_model(*args, **kwargs):
     return model
 
 
-def is_in_branch():
+def restrict_to_viewable(user, objects):
     """
-    Check if currently operating within a branch.
+    Return the subset of ``objects`` the user may view, preserving order.
 
-    Returns:
-        bool: True if currently in a branch, False otherwise.
+    The top-level query restricts the custom objects themselves, but the objects
+    reached through their relationship fields are *not* covered by that check, so
+    each one must be gated here or the field would leak objects the user cannot
+    see.  Used for both single- and multi-object fields so the permission rule
+    lives in one place; batches the check to one query per distinct model rather
+    than one ``.exists()`` per object (an N+1 explosion on multi-object fields):
+    the related objects are grouped by model and each model's permission-restricted
+    queryset is evaluated once with ``pk__in``.
+
+    The user (anonymous or ``None`` included) is passed straight to the model
+    manager's ``restrict(user, "view")``, mirroring NetBox's
+    ``BaseObjectType.get_queryset`` — superuser bypass, ``EXEMPT_VIEW_PERMISSIONS``
+    and anonymous handling are all left to ``restrict``.  Models whose manager has
+    no ``restrict`` (not permission-aware) are treated as all-viewable.
     """
-    try:
-        from netbox_branching.contextvars import active_branch
-        return active_branch.get() is not None
-    except ImportError:
-        # Branching plugin not installed
-        return False
+    objects = [obj for obj in objects if obj is not None]
+    if not objects:
+        return []
+    if getattr(user, "is_superuser", False):
+        return objects
+
+    # sentinel meaning "model isn't permission-aware → all allowed".
+    allowed_by_model = {}
+    by_model = {}
+    for obj in objects:
+        by_model.setdefault(type(obj), []).append(obj)
+    for model, model_objs in by_model.items():
+        manager = getattr(model, "_default_manager", None)
+        if manager is None or not hasattr(manager, "restrict"):
+            allowed_by_model[model] = None
+            continue
+        pks = [obj.pk for obj in model_objs]
+        allowed_by_model[model] = set(
+            manager.restrict(user, "view").filter(pk__in=pks).values_list("pk", flat=True)
+        )
+
+    return [
+        obj
+        for obj in objects
+        if (allowed_by_model[type(obj)] is None or obj.pk in allowed_by_model[type(obj)])
+    ]

@@ -1,3 +1,5 @@
+import copy
+
 from django import forms
 from django.utils.translation import gettext_lazy as _
 from extras.choices import CustomFieldTypeChoices
@@ -8,16 +10,13 @@ from utilities.forms.fields import (CommentField, ContentTypeChoiceField,
                                     ContentTypeMultipleChoiceField,
                                     DynamicModelChoiceField, SlugField, TagFilterField)
 from utilities.forms.rendering import FieldSet
+from utilities.forms.widgets import BulkEditNullBooleanSelect
 from utilities.forms.utils import get_field_value
 from utilities.object_types import object_type_name
 
-from netbox_custom_objects.choices import SearchWeightChoices
+from netbox_custom_objects.choices import SearchWeightChoices, TYPE_OBJECT_PROXY
 from netbox_custom_objects.utilities import extract_cot_id_from_model_name
 from netbox_custom_objects.constants import APP_LABEL
-from netbox_custom_objects.field_types import (
-    PolymorphicObjectReverseDescriptor,
-    PolymorphicMultiObjectReverseDescriptor,
-)
 from netbox_custom_objects.models import (CustomObjectObjectType,
                                           CustomObjectType,
                                           CustomObjectTypeField)
@@ -27,6 +26,7 @@ __all__ = (
     "CustomObjectTypeBulkEditForm",
     "CustomObjectTypeImportForm",
     "CustomObjectTypeFilterForm",
+    "CustomObjectTypeGroupListFilterForm",
     "CustomObjectTypeFieldForm",
     "CustomObjectType",
 )
@@ -59,11 +59,48 @@ class CustomObjectTypeForm(NetBoxModelForm):
             "\"/plugins/custom-objects/vendor-policies/\""
         ),
     )
+    metadata = forms.CharField(
+        label=_("Metadata (YAML/JSON)"),
+        required=False,
+        widget=forms.Textarea(attrs={"rows": 6, "class": "font-monospace"}),
+        help_text=_(
+            "Free-form YAML or JSON metadata for properties that have no dedicated "
+            "field. Stored as-is; not interpreted by the plugin."
+        ),
+    )
+    link_table = forms.TypedChoiceField(
+        label=_("Link table (show connected objects)"),
+        required=False,
+        choices=(
+            (False, _("No")),
+            (True, _("Yes")),
+        ),
+        coerce=lambda value: str(value) in ("True", "true", "2", "on"),
+        empty_value=False,
+        widget=forms.Select(),
+        help_text=_(
+            "Treat this Custom Object Type as an n:m link table. When enabled and "
+            "the type has exactly two object fields, the combined Custom Objects tab "
+            "shows the far endpoint of each link as the primary object, with the link "
+            "table row itself surfaced as a \"via\" reference."
+        ),
+    )
+    views = forms.MultipleChoiceField(
+        label=_("Views"),
+        required=False,
+        choices=(),
+        help_text=_(
+            "Registered COT views to expose as related tabs on this type's objects. "
+            "Newly registered views (e.g. from a bundle just enabled) appear "
+            "here only after the NetBox workers are restarted."
+        ),
+    )
 
     fieldsets = (
         FieldSet(
             "name", "verbose_name", "verbose_name_plural", "slug",
-            "version", "description", "group_name", "tags",
+            "version", "description", "group_name",
+            "menu_name", "link_table", "views", "metadata", "tags",
         ),
     )
     comments = CommentField()
@@ -72,20 +109,50 @@ class CustomObjectTypeForm(NetBoxModelForm):
         model = CustomObjectType
         fields = (
             "name", "verbose_name", "verbose_name_plural", "slug", "version", "description",
-            "group_name", "comments", "tags",
+            "group_name", "menu_name", "link_table", "views", "metadata", "comments", "tags",
         )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Choices come from the live registry; preserve any already-saved keys
+        # whose view isn't registered (plugin disabled / pending worker restart)
+        # so editing the type doesn't silently drop them.
+        from netbox_custom_objects.cot_views.registry import all_cot_views
+
+        registered = all_cot_views()
+        choices = {key: (view_cls.label or key) for key, view_cls in registered.items()}
+        existing = self.instance.get_view_keys() if self.instance and self.instance.pk else []
+        for key in existing:
+            choices.setdefault(key, key)
+        self.fields["views"].choices = sorted(choices.items())
+        # Override the ModelForm's string initial ("a,b") with a real list so the
+        # multi-select renders the saved keys as selected.
+        self.initial["views"] = existing
+
+    def clean_views(self):
+        # Model field is a comma-separated CharField.
+        return ",".join(self.cleaned_data.get("views") or [])
 
 
 class CustomObjectTypeBulkEditForm(NetBoxModelBulkEditForm):
     description = forms.CharField(
         label=_("Description"), max_length=200, required=False
     )
+    menu_name = forms.CharField(
+        label=_("Menu name"), max_length=100, required=False
+    )
+    link_table = forms.NullBooleanField(
+        label=_("Link table (show connected objects)"),
+        required=False,
+        widget=BulkEditNullBooleanSelect(),
+    )
     comments = CommentField()
 
     model = CustomObjectType
-    fieldsets = (FieldSet("description"),)
+    fieldsets = (FieldSet("description", "menu_name", "link_table"),)
     nullable_fields = (
         "description",
+        "menu_name",
         "comments",
     )
 
@@ -98,6 +165,10 @@ class CustomObjectTypeImportForm(NetBoxModelImportForm):
             "name",
             "slug",
             "description",
+            "group_name",
+            "menu_name",
+            "link_table",
+            "metadata",
             "comments",
             "tags",
         )
@@ -107,6 +178,11 @@ class CustomObjectTypeFilterForm(NetBoxModelFilterSetForm):
     model = CustomObjectType
     fieldsets = (FieldSet("q", "filter_id", "tag"),)
     tag = TagFilterField(model)
+
+
+class CustomObjectTypeGroupListFilterForm(NetBoxModelFilterSetForm):
+    model = CustomObjectType
+    fieldsets = (FieldSet("q", "name", "description", "filter_id"),)
 
 
 class CustomContentTypeChoiceField(ContentTypeChoiceField):
@@ -217,7 +293,7 @@ class CustomObjectTypeFieldForm(CustomFieldForm):
 
     class Meta:
         model = CustomObjectTypeField
-        fields = "__all__"
+        fields = '__all__'
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -242,6 +318,27 @@ class CustomObjectTypeFieldForm(CustomFieldForm):
             is_polymorphic = bool(self.data.get('is_polymorphic'))
         else:
             is_polymorphic = bool(get_field_value(self, 'is_polymorphic'))
+
+        # Object Proxy: a virtual field that targets a single NetBox model.
+        # The parent stripped related_object_type/related_object_filter (it only
+        # keeps them for object/multiobject), so re-add them and suppress the
+        # polymorphism / reverse-relation / on-delete controls that don't apply.
+        if field_type == TYPE_OBJECT_PROXY:
+            for fname in ("related_object_type", "related_object_filter"):
+                if fname not in self.fields:
+                    self.fields[fname] = copy.deepcopy(self.base_fields[fname])
+            for fname in ("is_polymorphic", "related_object_types", "related_name", "on_delete_behavior"):
+                self.fields.pop(fname, None)
+            self.fields["related_object_type"].required = True
+            self.fieldsets = (
+                CustomObjectTypeFieldForm.fieldsets[0],
+                FieldSet("related_object_type", "related_object_filter", name=_("Related Object")),
+                CustomObjectTypeFieldForm.fieldsets[2],
+            )
+            if self.instance.pk:
+                self.fields["custom_object_type"].disabled = True
+                self.fields["related_object_type"].disabled = True
+            return
 
         # Show only the relevant related-object field and rebuild fieldsets cleanly.
         # The parent __init__ inserts a simple FieldSet('related_object_type', ...) for
@@ -278,13 +375,9 @@ class CustomObjectTypeFieldForm(CustomFieldForm):
                 if not all(isinstance(item, str) and item in _related_names for item in fs.items)
             )
 
-        # custom_object_type is always read-only: new fields are always created in the
-        # context of a specific COT (passed via URL param), and existing fields cannot
-        # be moved to a different COT.
-        self.fields["custom_object_type"].disabled = True
-
-        # Remaining immutable fields only apply to existing instances.
+        # Disable immutable fields on existing instances.
         if self.instance.pk:
+            self.fields["custom_object_type"].disabled = True
             if 'is_polymorphic' in self.fields:
                 self.fields["is_polymorphic"].disabled = True
             if 'related_object_types' in self.fields:
@@ -296,18 +389,17 @@ class CustomObjectTypeFieldForm(CustomFieldForm):
         if get_field_value(self, 'type') == CustomFieldTypeChoices.TYPE_MULTIOBJECT:
             self.fields["unique"].disabled = True
 
-        # Add related_name (and on_delete_behavior for non-polymorphic single-object
-        # fields) to the Related Object fieldset.  Polymorphic mode removes
-        # related_object_type from self.fields and substitutes related_object_types,
-        # so check for either to detect object/multiobject fields (issue #522).
-        is_object_field = "related_object_type" in self.fields or "related_object_types" in self.fields
-        if is_object_field:
+        # Add related_name (and on_delete_behavior for single-object fields) to the
+        # Related Object fieldset.  The parent CustomFieldForm.__init__ removes
+        # related_object_type from self.fields for non-object types, so we use its
+        # presence as a signal.
+        if "related_object_type" in self.fields:
             field_type = get_field_value(self, 'type')
-            is_single_object = field_type == CustomFieldTypeChoices.TYPE_OBJECT and not is_polymorphic
+            is_single_object = field_type == CustomFieldTypeChoices.TYPE_OBJECT
             extra = ("related_name", "on_delete_behavior") if is_single_object else ("related_name",)
             self.fieldsets = tuple(
                 FieldSet(*fs.items, *extra, name=fs.name)
-                if ("related_object_type" in fs.items or "related_object_types" in fs.items)
+                if "related_object_type" in fs.items
                 else fs
                 for fs in self.fieldsets
             )
@@ -321,7 +413,38 @@ class CustomObjectTypeFieldForm(CustomFieldForm):
         cleaned_data = super().clean()
         field_type = cleaned_data.get("type")
         is_polymorphic = cleaned_data.get("is_polymorphic", False)
-        related_name = cleaned_data.get("related_name", "")
+
+        # Object Proxy is exclusive ("one and only"): a proxy type may have
+        # exactly one field (the proxy).  Block adding a proxy to a type that
+        # already has fields, adding any field to a proxy type, and a second
+        # proxy field.
+        cot = cleaned_data.get("custom_object_type")
+        if cot is not None and cot.pk:
+            siblings = cot.fields(manager="objects").all()
+            if self.instance.pk:
+                siblings = siblings.exclude(pk=self.instance.pk)
+            # Tell the model-layer check (a defensive net for non-form saves)
+            # that the form already validated exclusivity, so the same message
+            # isn't reported twice in the GUI flow.
+            self.instance._proxy_exclusivity_checked = True
+            exclusivity_error = None
+            if field_type == TYPE_OBJECT_PROXY:
+                if siblings.exists():
+                    exclusivity_error = _(
+                        "An Object Proxy field must be the only field on its custom "
+                        "object type, but this type already has other fields."
+                    )
+            elif siblings.filter(type=TYPE_OBJECT_PROXY).exists():
+                exclusivity_error = _(
+                    "This custom object type has an Object Proxy field and cannot "
+                    "have any additional fields."
+                )
+            if exclusivity_error:
+                self.add_error("type", exclusivity_error)
+                # add_error() drops "type" from cleaned_data; restore it so the
+                # model's own clean() re-validates with the real type instead of
+                # the field default (which would emit a misleading secondary error).
+                cleaned_data["type"] = field_type
 
         if field_type in (
             CustomFieldTypeChoices.TYPE_OBJECT,
@@ -333,41 +456,6 @@ class CustomObjectTypeFieldForm(CustomFieldForm):
                     "related_object_types",
                     _("Polymorphic object fields must specify at least one related object type."),
                 )
-
-            # For new instances the model's clean() never runs the target-attribute check
-            # (it requires self.pk so it can query related_object_types rows).  Do it here
-            # instead, where cleaned_data already contains the submitted types.
-            if related_name and related_object_types:
-                for ot in related_object_types:
-                    target_cls = ot.model_class()
-                    if target_cls is None:
-                        continue
-                    existing = getattr(target_cls, related_name, None)
-                    if existing is None:
-                        continue
-                    # Determine whether this exact field already owns the descriptor
-                    # (re-saving an existing field is allowed).
-                    is_owned_by_this_field = False
-                    inst = self.instance
-                    if inst and inst.pk:
-                        cot_pk = inst.custom_object_type_id
-                        if isinstance(existing, PolymorphicObjectReverseDescriptor):
-                            is_owned_by_this_field = (
-                                existing.cot_pk == cot_pk and existing.field_name == inst.name
-                            )
-                        elif isinstance(existing, PolymorphicMultiObjectReverseDescriptor):
-                            is_owned_by_this_field = (
-                                existing.cot_pk == cot_pk
-                                and existing.through_model_name == inst.through_model_name
-                            )
-                    if not is_owned_by_this_field:
-                        self.add_error(
-                            "related_name",
-                            _('Reverse relation name "{name}" conflicts with an existing '
-                              'attribute on model "{model}". Choose a different name.'
-                              ).format(name=related_name, model=target_cls.__name__),
-                        )
-                        break
 
         return cleaned_data
 

@@ -26,6 +26,7 @@ import logging
 from netbox_custom_objects import constants
 from netbox_custom_objects.schema.format import (
     CHOICES_TO_SCHEMA_TYPE,
+    COT_ATTR_DEFAULTS,
     CUSTOM_OBJECTS_APP_LABEL_SLUG,
     FIELD_DEFAULTS,
     FIELD_TYPE_ATTRS,
@@ -191,6 +192,15 @@ def export_cot(cot) -> dict:
         result["description"] = cot.description
     if cot.group_name:
         result["group_name"] = cot.group_name
+
+    # COT enhancement attributes — omit when equal to their documented default.
+    # ``metadata`` is emitted as the raw string (a YAML dumper renders a
+    # multi-line value as a block scalar); it is never parsed into a mapping so
+    # the round-trip stays lossless.
+    for attr, default in COT_ATTR_DEFAULTS.items():
+        value = getattr(cot, attr)
+        if value != default:
+            result[attr] = value
 
     # Active + deprecated fields, ordered by schema_id for stable output.
     exported_fields = []

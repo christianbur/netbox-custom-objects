@@ -13,6 +13,8 @@ Format version history
 
 from extras.choices import CustomFieldTypeChoices
 
+from netbox_custom_objects.choices import TYPE_OBJECT_PROXY
+
 # ── Format version ──────────────────────────────────────────────────────────
 # Bump this only when the format itself changes in a breaking way.
 SCHEMA_FORMAT_VERSION = "1"
@@ -34,6 +36,7 @@ FIELD_TYPE_SELECT = "select"
 FIELD_TYPE_MULTISELECT = "multiselect"
 FIELD_TYPE_OBJECT = "object"
 FIELD_TYPE_MULTIOBJECT = "multiobject"
+FIELD_TYPE_OBJECT_PROXY = "object_proxy"
 
 # Mapping from CustomFieldTypeChoices values to schema type names.
 # Used by the exporter; the importer uses the inverse.
@@ -51,6 +54,7 @@ CHOICES_TO_SCHEMA_TYPE = {
     CustomFieldTypeChoices.TYPE_MULTISELECT: FIELD_TYPE_MULTISELECT,
     CustomFieldTypeChoices.TYPE_OBJECT: FIELD_TYPE_OBJECT,
     CustomFieldTypeChoices.TYPE_MULTIOBJECT: FIELD_TYPE_MULTIOBJECT,
+    TYPE_OBJECT_PROXY: FIELD_TYPE_OBJECT_PROXY,
 }
 
 SCHEMA_TYPE_TO_CHOICES = {v: k for k, v in CHOICES_TO_SCHEMA_TYPE.items()}
@@ -92,6 +96,19 @@ FIELD_DEFAULTS = {
     # related_object_types has no scalar default (M2M list); absence means []
 }
 
+# ── Custom Object Type level attribute defaults ──────────────────────────────
+# COT-level (non-field) attributes that round-trip through the schema document
+# in addition to name/slug/version/verbose_name*/description/group_name.  A
+# value matching its default here MAY be omitted from the export; the importer
+# re-applies the default when the key is absent.  ``link_table`` is boolean and
+# must be handled with an explicit ``False`` default (never via ``or ""``).
+COT_ATTR_DEFAULTS = {
+    "link_table": False,
+    "menu_name": "",
+    "metadata": "",
+    "views": "",
+}
+
 # ── Field groups by type ─────────────────────────────────────────────────────
 # Which type-specific attributes are valid for each field type.
 # Used by the exporter to omit irrelevant keys and by the JSON Schema.
@@ -112,6 +129,9 @@ FIELD_TYPE_ATTRS = {
         "is_polymorphic", "related_object_type", "related_object_types", "related_object_filter", "on_delete_behavior"
     },
     FIELD_TYPE_MULTIOBJECT: {"is_polymorphic", "related_object_type", "related_object_types", "related_object_filter"},
+    # Proxy fields are non-polymorphic by definition: only a single target type
+    # plus an optional filter round-trip.
+    FIELD_TYPE_OBJECT_PROXY: {"related_object_type", "related_object_filter"},
 }
 
 # ── Field base attributes ─────────────────────────────────────────────────────

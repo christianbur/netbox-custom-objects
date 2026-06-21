@@ -1,13 +1,25 @@
+import json
 import logging
 
+try:
+    import yaml
+except ImportError:  # pragma: no cover - pyyaml is an optional dependency
+    yaml = None
+
 from core.models import ObjectChange
+from core.signals import clear_events
 from core.tables import ObjectChangeTable
 from django.apps import apps as django_apps
+from django.contrib import messages
 from django.contrib.contenttypes.models import ContentType
+from django.db import router, transaction
 from django.db.models import ProtectedError, Q, RestrictedError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.html import escape
+from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
+from utilities.exceptions import AbortRequest, PermissionsViolation
 from django.views.generic import View
 from extras.choices import CustomFieldUIVisibleChoices
 from extras.forms import JournalEntryForm
@@ -35,11 +47,141 @@ from netbox_custom_objects.tables import CustomObjectTable, CustomObjectTypeFiel
 from . import field_types, filtersets, forms, tables
 from .models import CustomObject, CustomObjectType, CustomObjectTypeField
 from extras.choices import CustomFieldTypeChoices
+from netbox_custom_objects.choices import TYPE_OBJECT_PROXY
 from netbox_custom_objects.constants import APP_LABEL
 from netbox_custom_objects.dynamic_forms import build_filterset_form_class
-from netbox_custom_objects.utilities import extract_cot_id_from_model_name, is_in_branch
+from netbox_custom_objects.utilities import extract_cot_id_from_model_name
+from netbox_custom_objects.schema.comparator import diff_document
+from netbox_custom_objects.schema.exporter import export_cots
+from netbox_custom_objects.schema.executor import (
+    apply_document,
+    CircularDependencyError,
+    DestructiveChangesError,
+    UnknownChoiceSetError,
+    UnknownFieldTypeError,
+    UnknownObjectTypeError,
+)
+from netbox_custom_objects.schema.validation import schema_error_dicts
 
 logger = logging.getLogger("netbox_custom_objects.views")
+
+
+# ---------------------------------------------------------------------------
+# Portable-schema (define-via-text / export) helpers
+#
+# These thin helpers serialise/parse a portable-schema *document* (the dict
+# produced by schema.exporter.export_cots and consumed by
+# schema.executor.apply_document).  They never reimplement the schema logic;
+# they only translate between text (JSON / YAML) and the backend's dict form.
+# ---------------------------------------------------------------------------
+
+# YAML is preferred for display/round-trip when available (more readable for
+# multi-line metadata); JSON is always available as a fallback.
+SCHEMA_TEXT_YAML = "yaml"
+SCHEMA_TEXT_JSON = "json"
+
+
+def _schema_document_to_json(document) -> str:
+    return json.dumps(document, indent=2, ensure_ascii=False, sort_keys=False, default=str)
+
+
+def _schema_document_to_yaml(document):
+    """Render *document* as YAML, or ``None`` when pyyaml isn't installed."""
+    if yaml is None:
+        return None
+    return yaml.safe_dump(
+        document, sort_keys=False, allow_unicode=True, default_flow_style=False
+    )
+
+
+def _parse_schema_text(text):
+    """
+    Parse a pasted portable-schema document.
+
+    Accepts JSON or YAML (JSON is a subset of YAML, so YAML parsing covers
+    both; JSON is tried first for clearer error messages on JSON input).
+    Returns the parsed object.  Raises ``ValueError`` with a human-readable
+    message on a parse error or when the result isn't a mapping.
+    """
+    text = (text or "").strip()
+    if not text:
+        raise ValueError(_("No schema document was provided."))
+
+    parsed = None
+    json_error = None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        json_error = exc
+
+    if json_error is not None:
+        if yaml is None:
+            raise ValueError(
+                _("Could not parse the document as JSON: %(error)s") % {"error": json_error}
+            )
+        try:
+            parsed = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise ValueError(
+                _("Could not parse the document as JSON or YAML: %(error)s") % {"error": exc}
+            )
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            _("The schema document must be a mapping (object) with a 'types' list.")
+        )
+    return parsed
+
+
+def _is_in_branch():
+    """True if a netbox-branching branch is active in this context."""
+    try:
+        from netbox_branching.contextvars import active_branch
+        return active_branch.get() is not None
+    except ImportError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Weight-ordered field grouping
+#
+# Sections (groups) are positioned by their members' display weight rather
+# than alphabetically by group name.  Callers iterate fields in display-weight
+# order; a group accumulates all its members into a single section anchored at
+# the group's first-seen (lowest-weight) member, so the section appears at the
+# position implied by its fields' weights and stays contiguous.  Ungrouped
+# fields each become their own single-entry section so they interleave with
+# groups by weight.
+# ---------------------------------------------------------------------------
+
+
+def _append_field_group_entry(field_groups, group_name, entry):
+    """Add *entry* to the weight-ordered *field_groups* list.
+
+    *field_groups* is a list of ``[group_name, [entries]]`` sections.  A
+    truthy *group_name* accumulates into the existing section for that group
+    (anchored at its lowest-weight member); a falsy *group_name* (ungrouped
+    field) becomes its own single-entry section so it interleaves by weight.
+    """
+    if group_name:
+        for section in field_groups:
+            if section[0] == group_name:
+                section[1].append(entry)
+                return
+    field_groups.append([group_name or None, [entry]])
+
+
+def build_field_groups_by_weight(fields):
+    """Return an ordered list of ``[group_name, [field]]`` sections.
+
+    Fields are ordered globally by display weight; groups are positioned by
+    their members' weights and stay contiguous, while ungrouped fields
+    interleave between them (see :func:`_append_field_group_entry`).
+    """
+    field_groups = []
+    for field in sorted(fields, key=lambda f: (f.weight, f.name)):
+        _append_field_group_entry(field_groups, field.group_name or None, field)
+    return field_groups
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +359,12 @@ class CustomJournalEntryEditView(generic.ObjectEditView):
 
 class CustomObjectTableMixin(TableMixin):
     def get_table(self, data, request, bulk_actions=True):
-        model_fields = self.custom_object_type.fields.all()
+        # Order columns by display weight (then name) so the table matches the
+        # form/detail ordering and is not driven by group_name alphabetics (#577).
+        model_fields = self.custom_object_type.fields.all().order_by("weight", "name")
+        # object_proxy fields are virtual (no DB column / model attribute), so
+        # they must never become table columns.
+        model_fields = [f for f in model_fields if f.type != TYPE_OBJECT_PROXY]
         fields = ["id"] + [
             field.name
             for field in model_fields
@@ -303,16 +450,10 @@ class CustomObjectTypeView(CustomObjectTableMixin, generic.ObjectView):
     def get_extra_context(self, request, instance):
         model = instance.get_model_with_serializer()
 
-        # Get fields and group them by group_name
-        fields = instance.fields.all().order_by("group_name", "weight", "name")
-
-        # Group fields by group_name
-        field_groups = {}
-        for field in fields:
-            group_name = field.group_name or None  # Use None for ungrouped fields
-            if group_name not in field_groups:
-                field_groups[group_name] = []
-            field_groups[group_name].append(field)
+        # Group fields into sections ordered by display weight (see
+        # build_field_groups_by_weight); sections follow their members'
+        # weights rather than the group name alphabetically.
+        field_groups = build_field_groups_by_weight(instance.fields.all())
 
         return {
             "custom_objects": model.objects.all(),
@@ -328,18 +469,12 @@ class CustomObjectTypeEditView(generic.ObjectEditView):
     form = forms.CustomObjectTypeForm
     template_name = 'netbox_custom_objects/customobjecttype_edit.html'
 
-    def get_extra_context(self, request, instance):
-        return {'branch_bypass_warning': is_in_branch()}
-
 
 @register_model_view(CustomObjectType, "delete")
 class CustomObjectTypeDeleteView(generic.ObjectDeleteView):
     queryset = CustomObjectType.objects.all()
     default_return_url = "plugins:netbox_custom_objects:customobjecttype_list"
     template_name = 'netbox_custom_objects/customobjecttype_delete.html'
-
-    def get_extra_context(self, request, instance):
-        return {'branch_bypass_warning': is_in_branch()}
 
     def _get_dependent_objects(self, obj):
         dependent_objects = super()._get_dependent_objects(obj)
@@ -375,6 +510,36 @@ class CustomObjectTypeFieldsView(generic.ObjectChildrenView):
         return CustomObjectTypeField.objects.restrict(request.user, 'view').filter(custom_object_type=parent)
 
 
+@register_model_view(CustomObjectType, 'export', path='export')
+class CustomObjectTypeSchemaView(generic.ObjectView):
+    """
+    Read-only "Export" tab on the CustomObjectType detail page.
+
+    Renders the COT's portable-schema export (a single-COT schema document) as
+    text in both YAML and JSON, with a copy affordance.  Reuses
+    ``schema.exporter.export_cots`` so the output is a complete, re-importable
+    document — paste it straight into the "Define via text" screen.
+    """
+
+    queryset = CustomObjectType.objects.all()
+    template_name = 'netbox_custom_objects/customobjecttype_schema.html'
+    tab = ViewTab(
+        label=_('Export'),
+        permission='netbox_custom_objects.view_customobjecttype',
+        weight=560,
+    )
+
+    def get_extra_context(self, request, instance):
+        document = export_cots([instance])
+        yaml_text = _schema_document_to_yaml(document)
+        return {
+            'schema_json': _schema_document_to_json(document),
+            'schema_yaml': yaml_text,
+            'yaml_available': yaml_text is not None,
+            'default_format': SCHEMA_TEXT_YAML if yaml_text is not None else SCHEMA_TEXT_JSON,
+        }
+
+
 #
 # Custom Object Type Fields
 #
@@ -385,23 +550,6 @@ class CustomObjectTypeFieldEditView(generic.ObjectEditView):
     queryset = CustomObjectTypeField.objects.all()
     form = forms.CustomObjectTypeFieldForm
     template_name = 'netbox_custom_objects/customobjecttypefield_edit.html'
-
-    def alter_object(self, obj, request, url_args, url_kwargs):
-        # For new fields, pre-populate custom_object_type from the request so that the
-        # disabled field has a value for both GET (display) and POST (validation/save).
-        # The normal Add flow passes custom_object_type as a URL query param; the test
-        # harness (PrimaryObjectViewTestCase) passes it in the POST body instead.
-        if not obj.pk:
-            cot_pk = request.GET.get('custom_object_type') or request.POST.get('custom_object_type')
-            if cot_pk:
-                try:
-                    obj.custom_object_type_id = int(cot_pk)
-                except (ValueError, TypeError):
-                    pass
-        return obj
-
-    def get_extra_context(self, request, instance):
-        return {'branch_bypass_warning': is_in_branch()}
 
 
 @register_model_view(CustomObjectTypeField, "delete")
@@ -490,9 +638,6 @@ class CustomObjectTypeFieldDeleteView(generic.ObjectDeleteView):
 
         return dependent_objects
 
-    def get_extra_context(self, request, instance):
-        return {'branch_bypass_warning': is_in_branch()}
-
 
 @register_model_view(CustomObjectType, "bulk_import", path="import", detail=False)
 class CustomObjectTypeBulkImportView(generic.BulkImportView):
@@ -500,8 +645,140 @@ class CustomObjectTypeBulkImportView(generic.BulkImportView):
     model_form = forms.CustomObjectTypeImportForm
     template_name = 'netbox_custom_objects/customobjecttype_bulk_import.html'
 
-    def get_extra_context(self, request):
-        return {'branch_bypass_warning': is_in_branch()}
+
+@register_model_view(CustomObjectType, "define", path="define", detail=False)
+class CustomObjectTypeDefineView(ConditionalLoginRequiredMixin, View):
+    """
+    "Define via text" screen for Custom Object Types.
+
+    The user pastes a portable-schema document (JSON or YAML) describing one or
+    more COTs.  ``Preview`` validates the document against ``cot_schema_v1.json``
+    and shows the comparator diff; ``Apply`` runs it through the existing
+    executor (``schema.executor.apply_document``) to create/update the COT(s).
+
+    All schema logic is delegated to the portable-schema backend — this view
+    only handles text I/O, permission checks and rendering.
+    """
+
+    template_name = 'netbox_custom_objects/customobjecttype_define.html'
+
+    def _can_apply(self, request):
+        return (
+            request.user.has_perm('netbox_custom_objects.add_customobjecttype')
+            and request.user.has_perm('netbox_custom_objects.change_customobjecttype')
+        )
+
+    def _context(self, request, **extra):
+        ctx = {
+            'document_text': '',
+            'document_format': '',
+            'diffs': None,
+            'schema_errors': None,
+            'parse_error': None,
+            'apply_error': None,
+            'can_apply': self._can_apply(request),
+            'yaml_available': yaml is not None,
+            'return_url': reverse('plugins:netbox_custom_objects:customobjecttype_list'),
+        }
+        ctx.update(extra)
+        return ctx
+
+    def get(self, request, *args, **kwargs):
+        if not request.user.has_perm('netbox_custom_objects.view_customobjecttype'):
+            return redirect(
+                reverse('plugins:netbox_custom_objects:customobjecttype_list')
+            )
+        return render(request, self.template_name, self._context(request))
+
+    def post(self, request, *args, **kwargs):
+        document_text = request.POST.get('document_text', '')
+        action = request.POST.get('action', 'preview')
+        allow_destructive = request.POST.get('allow_destructive') in ('on', 'true', '1')
+
+        base = {'document_text': document_text, 'allow_destructive': allow_destructive}
+
+        # 1) Parse the pasted text (JSON or YAML).
+        try:
+            schema_doc = _parse_schema_text(document_text)
+        except ValueError as exc:
+            return render(
+                request, self.template_name,
+                self._context(request, parse_error=str(exc), **base),
+            )
+
+        # 2) Validate against cot_schema_v1.json (cheap; always do it).
+        schema_errors = schema_error_dicts(schema_doc)
+        if schema_errors:
+            return render(
+                request, self.template_name,
+                self._context(request, schema_errors=schema_errors, **base),
+            )
+
+        # 3) Compute the comparator diff for display (cheap, read-only).
+        try:
+            diffs = diff_document(schema_doc)
+        except Exception as exc:
+            logger.debug("define-via-text: diff failed", exc_info=True)
+            return render(
+                request, self.template_name,
+                self._context(request, apply_error=str(exc), **base),
+            )
+
+        # Preview only — show the diff and stop here.
+        if action != 'apply':
+            return render(
+                request, self.template_name,
+                self._context(request, diffs=diffs, **base),
+            )
+
+        # 4) Apply.
+        if not self._can_apply(request):
+            return render(
+                request, self.template_name,
+                self._context(
+                    request, diffs=diffs,
+                    apply_error=_(
+                        "You need both the add and change permissions on Custom "
+                        "Object Types to apply a schema document."
+                    ),
+                    **base,
+                ),
+            )
+
+        try:
+            applied = apply_document(schema_doc, allow_destructive=allow_destructive)
+        except DestructiveChangesError as exc:
+            return render(
+                request, self.template_name,
+                self._context(
+                    request, diffs=diffs,
+                    apply_error=_(
+                        "%(detail)s Re-run with 'Allow destructive changes' enabled "
+                        "to apply field removals."
+                    ) % {'detail': str(exc)},
+                    **base,
+                ),
+            )
+        except (
+            CircularDependencyError,
+            UnknownChoiceSetError,
+            UnknownFieldTypeError,
+            UnknownObjectTypeError,
+        ) as exc:
+            return render(
+                request, self.template_name,
+                self._context(request, diffs=diffs, apply_error=str(exc), **base),
+            )
+
+        changed = [d.slug for d in applied if d.is_new or d.has_changes]
+        messages.success(
+            request,
+            _("Applied schema document: %(count)s Custom Object Type(s) processed%(detail)s.") % {
+                'count': len(applied),
+                'detail': (" (" + ", ".join(changed) + ")") if changed else "",
+            },
+        )
+        return redirect(reverse('plugins:netbox_custom_objects:customobjecttype_list'))
 
 
 @register_model_view(CustomObjectType, "bulk_edit", path="edit", detail=False)
@@ -512,9 +789,6 @@ class CustomObjectTypeBulkEditView(generic.BulkEditView):
     form = forms.CustomObjectTypeBulkEditForm
     template_name = 'netbox_custom_objects/customobjecttype_bulk_edit.html'
 
-    def get_extra_context(self, request):
-        return {'branch_bypass_warning': is_in_branch()}
-
 
 @register_model_view(CustomObjectType, "bulk_delete", path="delete", detail=False)
 class CustomObjectTypeBulkDeleteView(generic.BulkDeleteView):
@@ -522,9 +796,6 @@ class CustomObjectTypeBulkDeleteView(generic.BulkDeleteView):
     filterset = filtersets.CustomObjectTypeFilterSet
     table = tables.CustomObjectTypeTable
     template_name = 'netbox_custom_objects/customobjecttype_bulk_delete.html'
-
-    def get_extra_context(self, request):
-        return {'branch_bypass_warning': is_in_branch()}
 
 
 #
@@ -560,12 +831,85 @@ class CustomObjectListView(CustomObjectTableMixin, generic.ObjectListView):
         return build_filterset_form_class(self.queryset.model)
 
     def get(self, request, custom_object_type):
+        cot = self.custom_object_type
+        self._cot_tabs = []
+        assigned = self._assigned_views(cot) if cot is not None else []
+        view_param = request.GET.get("view")
+
+        # If the type has an assigned, registered view (and the built-in table
+        # wasn't explicitly requested), render that view as the primary content.
+        if assigned and view_param != "builtin":
+            keys = [key for key, _cls in assigned]
+            active_key = view_param if view_param in keys else keys[0]
+            view_cls = dict(assigned)[active_key]
+            tabs = self._build_tabs(cot, assigned, active_key)
+            if cot.is_proxy():
+                return view_cls().render_proxy(
+                    request, cot, cot.get_proxy_field(), extra_context={"cot_tabs": tabs}
+                )
+            queryset = self.queryset
+            if hasattr(queryset, "restrict"):
+                queryset = queryset.restrict(request.user, "view")
+            return view_cls().render_collection(
+                request, cot, queryset, extra_context={"cot_tabs": tabs}
+            )
+
+        # Proxy type without any usable assigned view: friendly empty state.
+        if cot is not None and cot.is_proxy() and not assigned:
+            return self._render_proxy_no_view(request, cot)
+
+        # Built-in object table (default for normal types, or ?view=builtin).
+        if assigned:
+            self._cot_tabs = self._build_tabs(cot, assigned, "builtin")
         # Necessary because get() in ObjectListView only takes request and no **kwargs
         return super().get(request)
+
+    def _assigned_views(self, cot):
+        """Return ``[(key, view_cls), ...]`` for this type's registered views."""
+        from netbox_custom_objects.cot_views.registry import get_cot_view
+
+        assigned = []
+        for view_key in cot.get_view_keys():
+            view_cls = get_cot_view(view_key)
+            if view_cls is not None:
+                assigned.append((view_key, view_cls))
+        return assigned
+
+    def _build_tabs(self, cot, assigned, active_key):
+        """Build the list-page tab descriptors: assigned view(s) + Built-in."""
+        base_url = reverse(
+            "plugins:netbox_custom_objects:customobject_list",
+            kwargs={"custom_object_type": cot.slug},
+        )
+        tabs = [
+            {
+                "label": getattr(view_cls, "label", key) or key,
+                "url": f"{base_url}?view={key}",
+                "active": key == active_key,
+            }
+            for key, view_cls in assigned
+        ]
+        tabs.append(
+            {
+                "label": _("Built-in"),
+                "url": f"{base_url}?view=builtin",
+                "active": active_key == "builtin",
+            }
+        )
+        return tabs
+
+    def _render_proxy_no_view(self, request, cot):
+        """Empty state for a proxy type whose assigned view isn't registered."""
+        return render(
+            request,
+            "netbox_custom_objects/cot_proxy_base.html",
+            {"cot": cot, "proxy_field": cot.get_proxy_field(), "proxy_no_view": True},
+        )
 
     def get_extra_context(self, request):
         return {
             "custom_object_type": self.custom_object_type,
+            "cot_tabs": getattr(self, "_cot_tabs", []),
         }
 
 
@@ -594,17 +938,12 @@ class CustomObjectView(generic.ObjectView):
         return get_object_or_404(model.objects.all(), **lookup_kwargs)
 
     def get_extra_context(self, request, instance):
-        fields = instance.custom_object_type.fields.all().order_by(
-            "group_name", "weight", "name"
-        )
+        fields = instance.custom_object_type.fields.all().order_by("weight", "name")
 
-        # Group fields by group_name
-        field_groups = {}
-        for field in fields:
-            group_name = field.group_name or None  # Use None for ungrouped fields
-            if group_name not in field_groups:
-                field_groups[group_name] = []
-            field_groups[group_name].append(field)
+        # Group fields into sections ordered by display weight (see
+        # build_field_groups_by_weight); sections follow their members'
+        # weights rather than the group name alphabetically.
+        field_groups = build_field_groups_by_weight(fields)
 
         return {
             "fields": fields,
@@ -616,6 +955,7 @@ class CustomObjectView(generic.ObjectView):
 class CustomObjectEditView(generic.ObjectEditView):
     template_name = "netbox_custom_objects/customobject_edit.html"
     htmx_template_name = "netbox_custom_objects/htmx/edit_fields.html"
+    _CO_QUICK_ADD_TEMPLATE = 'netbox_custom_objects/htmx/co_quick_add.html'
     form = None
     queryset = None
     object = None
@@ -638,6 +978,76 @@ class CustomObjectEditView(generic.ObjectEditView):
     def get_queryset(self, request):
         model = self.object._meta.model
         return model.objects.all()
+
+    def get(self, request, *args, **kwargs):
+        if not request.GET.get('_quickadd'):
+            return super().get(request, *args, **kwargs)
+        # Quick-add GET: the core htmx/quick_add.html uses {% action_url model 'add' %}
+        # which cannot resolve custom object URLs (they require a COT slug).
+        # Use our own template that builds the form action URL from the slug instead.
+        obj = self.object  # already populated by setup()
+        form = self.form(
+            instance=obj,
+            initial=normalize_querydict(request.GET),
+            prefix='quickadd',
+        )
+        restrict_form_fields(form, request.user)
+        return render(request, self._CO_QUICK_ADD_TEMPLATE, {
+            'model': obj._meta.model,
+            'object': obj,
+            'form': form,
+        })
+
+    def post(self, request, *args, **kwargs):
+        if '_quickadd' not in request.POST:
+            return super().post(request, *args, **kwargs)
+        # Quick-add POST: mirrors the parent's save logic but re-renders validation
+        # errors with our custom template instead of the core htmx/quick_add.html
+        # (which uses {% action_url model 'add' %} and fails for COT models).
+        _qa_logger = logging.getLogger('netbox.views.ObjectEditView')
+        obj = self.object  # already populated by setup()
+        model = self.queryset.model
+
+        if obj.pk and hasattr(obj, 'snapshot'):
+            obj.snapshot()
+
+        obj = self.alter_object(obj, request, args, kwargs)
+
+        form = self.form(
+            data=request.POST,
+            files=request.FILES,
+            instance=obj,
+            prefix='quickadd',
+        )
+        restrict_form_fields(form, request.user)
+
+        if form.is_valid():
+            obj._changelog_message = form.cleaned_data.pop('changelog_message', '')
+            try:
+                with transaction.atomic(using=router.db_for_write(model)):
+                    object_created = form.instance.pk is None
+                    obj = form.save()
+                    if not self.queryset.filter(pk=obj.pk).exists():
+                        raise PermissionsViolation()
+                msg = '{} {}'.format(
+                    'Created' if object_created else 'Modified',
+                    model._meta.verbose_name,
+                )
+                _qa_logger.info(f"{msg} {obj} (PK: {obj.pk})")
+                if hasattr(obj, 'get_absolute_url'):
+                    msg = mark_safe(f'{msg} <a href="{obj.get_absolute_url()}">{escape(obj)}</a>')
+                messages.success(request, msg)
+                return render(request, 'htmx/quick_add_created.html', {'object': obj})
+            except (AbortRequest, PermissionsViolation) as e:
+                _qa_logger.debug(e.message)
+                form.add_error(None, e.message)
+                clear_events.send(sender=self)
+
+        return render(request, self._CO_QUICK_ADD_TEMPLATE, {
+            'model': obj._meta.model,
+            'object': obj,
+            'form': form,
+        })
 
     def get_object(self, **kwargs):
         if self.object:
@@ -678,7 +1088,10 @@ class CustomObjectEditView(generic.ObjectEditView):
             "__module__": "database.forms",
             "_errors": None,
             "custom_object_type_fields": {},
-            "custom_object_type_field_groups": {},
+            # Ordered list of [group_name, [field_names]] sections (see
+            # build_field_groups_by_weight): sections follow display weight,
+            # not the group name alphabetically.
+            "custom_object_type_field_groups": [],
             # All field names rendered via custom_object_type_field_groups (used by
             # the template to avoid double-rendering in the generic field loop).
             "custom_object_type_rendered_names": set(),
@@ -697,7 +1110,7 @@ class CustomObjectEditView(generic.ObjectEditView):
         # Process custom object type fields (with grouping)
         for field in self.object.custom_object_type.fields.prefetch_related(
             'related_object_types'
-        ).order_by("group_name", "weight", "name"):
+        ).order_by("weight", "name"):
             field_type = field_types.FIELD_TYPE_CLASS[field.type]()
             group_name = field.group_name or None
 
@@ -712,9 +1125,9 @@ class CustomObjectEditView(generic.ObjectEditView):
                 # Only proceed if the generator yielded the pair (ct_sub in attrs).
                 # The template renders obj_sub as part of the grouped poly object pair.
                 if ct_sub in attrs:
-                    if group_name not in attrs["custom_object_type_field_groups"]:
-                        attrs["custom_object_type_field_groups"][group_name] = []
-                    attrs["custom_object_type_field_groups"][group_name].append(ct_sub)
+                    _append_field_group_entry(
+                        attrs["custom_object_type_field_groups"], group_name, ct_sub
+                    )
                     attrs["custom_object_type_poly_obj_fields"][field.name] = (ct_sub, obj_sub)
                     attrs["custom_object_type_poly_obj_ct_names"].add(ct_sub)
                     attrs["custom_object_type_poly_obj_pairs"][ct_sub] = (obj_sub, field_label)
@@ -731,9 +1144,9 @@ class CustomObjectEditView(generic.ObjectEditView):
                 if sub_names:
                     # Only add the first sub_name to field_groups; the template renders
                     # all sub_names as part of the grouped poly M2M block.
-                    if group_name not in attrs["custom_object_type_field_groups"]:
-                        attrs["custom_object_type_field_groups"][group_name] = []
-                    attrs["custom_object_type_field_groups"][group_name].append(sub_names[0])
+                    _append_field_group_entry(
+                        attrs["custom_object_type_field_groups"], group_name, sub_names[0]
+                    )
                     attrs["custom_object_type_poly_m2m_groups"][sub_names[0]] = (sub_names, field_label)
                 attrs["custom_object_type_poly_m2m_fields"][field.name] = sub_names
                 continue
@@ -745,10 +1158,10 @@ class CustomObjectEditView(generic.ObjectEditView):
                 # Annotate the field in the list of CustomField form fields
                 attrs["custom_object_type_fields"][field_name] = field
 
-                # Group fields by group_name (similar to NetBox custom fields)
-                if group_name not in attrs["custom_object_type_field_groups"]:
-                    attrs["custom_object_type_field_groups"][group_name] = []
-                attrs["custom_object_type_field_groups"][group_name].append(field_name)
+                # Group fields by group_name, ordered by display weight
+                _append_field_group_entry(
+                    attrs["custom_object_type_field_groups"], group_name, field_name
+                )
                 attrs["custom_object_type_rendered_names"].add(field_name)
 
             except NotImplementedError:
@@ -946,11 +1359,6 @@ class CustomObjectEditView(generic.ObjectEditView):
 
         return form_class
 
-    def get_extra_context(self, request, obj):
-        return {
-            'branch_warning': is_in_branch(),
-        }
-
 
 @register_model_view(CustomObject, "delete")
 class CustomObjectDeleteView(generic.ObjectDeleteView):
@@ -1034,7 +1442,7 @@ class CustomObjectDeleteView(generic.ObjectDeleteView):
         }
 
     def get_extra_context(self, request, instance):
-        return {'branch_warning': is_in_branch()}
+        return {'branch_warning': _is_in_branch()}
 
 
 @register_model_view(CustomObject, "bulk_edit", path="edit", detail=False)
@@ -1202,8 +1610,8 @@ class CustomObjectBulkEditView(CustomObjectTableMixin, generic.BulkEditView):
 
         # Apply polymorphic M2M sub-fields (union of all selected types).
         # set() replaces existing values, matching NetBox's standard bulk-edit
-        # behavior for direct M2M fields (see BulkEditView lines 718-723).
-        # Fields left blank are skipped so existing data is preserved.
+        # behavior for direct M2M fields.  Fields left blank are skipped so
+        # existing data is preserved.
         for field_name, sub_names in form._poly_m2m_field_map.items():
             combined = []
             has_any = False
@@ -1227,14 +1635,8 @@ class CustomObjectBulkEditView(CustomObjectTableMixin, generic.BulkEditView):
             return render(request, 'netbox_custom_objects/htmx/bulk_edit_fields.html', {
                 'form': form,
                 'return_url': self.get_return_url(request),
-                'branch_warning': is_in_branch(),
             })
         return redirect(self.get_return_url(request))
-
-    def get_extra_context(self, request):
-        return {
-            'branch_warning': is_in_branch(),
-        }
 
 
 @register_model_view(CustomObject, "bulk_delete", path="delete", detail=False)
@@ -1260,9 +1662,6 @@ class CustomObjectBulkDeleteView(CustomObjectTableMixin, generic.BulkDeleteView)
         )
         model = self.custom_object_type.get_model_with_serializer()
         return model.objects.all()
-
-    def get_extra_context(self, request):
-        return {'branch_warning': is_in_branch()}
 
 
 @register_model_view(CustomObject, "bulk_import", path="import", detail=False)
@@ -1326,11 +1725,6 @@ class CustomObjectBulkImportView(generic.BulkImportView):
         )
 
         return form
-
-    def get_extra_context(self, request):
-        return {
-            'branch_warning': is_in_branch(),
-        }
 
 
 class CustomObjectJournalView(ConditionalLoginRequiredMixin, View):
@@ -1455,5 +1849,47 @@ class CustomObjectChangeLogView(ConditionalLoginRequiredMixin, View):
                 "table": objectchanges_table,
                 "base_template": self.base_template,
                 "tab": "changelog",
+            },
+        )
+
+
+class CustomObjectContactsView(ConditionalLoginRequiredMixin, View):
+    """
+    Custom contacts view for CustomObject instances.
+    Shows all contacts assigned to a custom object.
+    """
+
+    tab = ViewTab(
+        label=_("Contacts"),
+        badge=lambda obj: obj.get_contacts().count(),
+        permission="tenancy.view_contactassignment",
+        weight=4500,
+    )
+
+    def get(self, request, custom_object_type, **kwargs):
+        from tenancy.tables import ContactAssignmentTable
+
+        object_type = get_object_or_404(CustomObjectType, slug=custom_object_type)
+        model = object_type.get_model_with_serializer()
+
+        lookup_kwargs = {k: v for k, v in kwargs.items() if k != "custom_object_type"}
+        obj = get_object_or_404(model.objects.all(), **lookup_kwargs)
+
+        contacts = (
+            obj.get_contacts()
+            .restrict(request.user, "view")
+            .order_by("priority", "contact", "role")
+        )
+        table = ContactAssignmentTable(data=contacts, orderable=False)
+        table.configure(request)
+
+        return render(
+            request,
+            "netbox_custom_objects/object_contacts.html",
+            {
+                "object": obj,
+                "table": table,
+                "base_template": "netbox_custom_objects/customobject.html",
+                "tab": "contacts",
             },
         )

@@ -12,7 +12,12 @@ from utilities.permissions import get_permission_for_model
 from netbox_custom_objects.models import CustomObject, CustomObjectType, CustomObjectTypeField
 from netbox_custom_objects.utilities import get_viewname
 
-__all__ = ("CustomObjectTable", "CustomObjectTypeFieldTable", "LinkedCustomObjectTable")
+__all__ = (
+    "CustomObjectTable",
+    "CustomObjectTypeFieldTable",
+    "CustomObjectTypeGroupListTable",
+    "CustomObjectTypeTable",
+)
 
 
 OBJECTCHANGE_FULL_NAME = """
@@ -50,24 +55,44 @@ OBJECTCHANGE_REQUEST_ID = """
 <a href="?request_id={{ value }}">{{ value }}</a>
 """
 
-# The {% url %} tag must stay on a single line: Django's template lexer does not parse a {% %}
-# tag whose delimiters span a newline. {% with %} shortens the slug accessor to keep it under 120.
-CUSTOM_OBJECT_TAGS = """
-{% load helpers %}
-{% with slug=record.custom_object_type.slug %}
-{% for tag in value.all %}
-    <a href="{% url 'plugins:netbox_custom_objects:customobject_list' custom_object_type=slug %}?tag={{ tag.slug }}">
-        <span {% if tag.description %}title="{{ tag.description }}"{% endif %}
-              class="badge"
-              style="color: {{ tag.color|fgcolor }}; background-color: #{{ tag.color }}">
-            {{ tag }}
-        </span>
-    </a>
-{% empty %}
-    <span class="text-muted">&mdash;</span>
-{% endfor %}
-{% endwith %}
-"""
+
+class CustomObjectTypeGroupListTable(NetBoxTable):
+    display_name = tables.Column(
+        verbose_name=_("Name"),
+        accessor="display_name",
+        linkify=lambda record: reverse(
+            "plugins:netbox_custom_objects:customobject_list",
+            kwargs={"custom_object_type": record.slug},
+        ),
+        order_by=("verbose_name", "name"),
+    )
+    instance_count = tables.Column(
+        verbose_name=_("Objects"),
+        accessor="instance_count",
+        orderable=False,
+    )
+    actions = columns.ActionsColumn(
+        actions=("edit",),
+    )
+
+    class Meta(NetBoxTable.Meta):
+        model = CustomObjectType
+        fields = (
+            "pk",
+            "display_name",
+            "name",
+            "instance_count",
+            "description",
+            "slug",
+            "actions",
+        )
+        default_columns = (
+            "pk",
+            "display_name",
+            "instance_count",
+            "description",
+            "actions",
+        )
 
 
 class CustomObjectTypeTable(NetBoxTable):
@@ -81,6 +106,9 @@ class CustomObjectTypeTable(NetBoxTable):
         verbose_name=_('Name'),
         linkify=True
     )
+    menu_name = tables.Column(
+        verbose_name=_('Menu name'),
+    )
 
     class Meta(NetBoxTable.Meta):
         model = CustomObjectType
@@ -88,6 +116,7 @@ class CustomObjectTypeTable(NetBoxTable):
             "pk",
             "id",
             "name",
+            "menu_name",
             "verbose_name",
             "verbose_name_plural",
             "slug",
@@ -101,6 +130,7 @@ class CustomObjectTypeTable(NetBoxTable):
             "pk",
             "id",
             "name",
+            "menu_name",
             "created",
             "last_updated",
         )
@@ -110,7 +140,21 @@ class CustomObjectTagColumn(columns.TagColumn):
     """
     Custom TagColumn that generates tag filter URLs with the custom_object_type slug.
     """
-    template_code = CUSTOM_OBJECT_TAGS
+    template_code = """
+    {% load helpers %}
+    {% for tag in value.all %}
+        <a href="{% url 'plugins:netbox_custom_objects:customobject_list'
+                  custom_object_type=record.custom_object_type.slug %}?tag={{ tag.slug }}">
+            <span {% if tag.description %}title="{{ tag.description }}"{% endif %}
+                  class="badge"
+                  style="color: {{ tag.color|fgcolor }}; background-color: #{{ tag.color }}">
+                {{ tag }}
+            </span>
+        </a>
+    {% empty %}
+        <span class="text-muted">&mdash;</span>
+    {% endfor %}
+    """
 
     def __init__(self):
         # Override parent __init__ to use our custom template
@@ -291,21 +335,3 @@ class CustomObjectTable(NetBoxTable):
             "created",
             "last_updated",
         )
-
-
-class LinkedCustomObjectTable(NetBoxTable):
-    custom_object_type = tables.Column(
-        accessor="custom_object__custom_object_type",
-        linkify=True,
-        verbose_name=_("Type"),
-    )
-    custom_object = tables.Column(
-        linkify=True,
-        verbose_name=_("Custom Object"),
-    )
-    field = tables.Column(verbose_name=_("Field"))
-
-    class Meta(NetBoxTable.Meta):
-        model = CustomObjectTypeField
-        fields = ("custom_object_type", "custom_object", "field")
-        default_columns = ("custom_object_type", "custom_object", "field")

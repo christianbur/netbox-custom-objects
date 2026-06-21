@@ -1,0 +1,66 @@
+{% extends 'generic/object.html' %}
+{% load i18n %}
+
+{% block content %}
+  <div class="row">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header">{% trans "Portable schema export" %}</h5>
+        <div class="card-body">
+          <p class="text-muted">
+            {% blocktrans %}Read-only portable-schema document for this Custom Object Type. Copy it and paste it into the <strong>JSON import</strong> screen to recreate or update this type elsewhere.{% endblocktrans %}
+          </p>
+
+          <ul class="nav nav-tabs" role="tablist">
+            {% if yaml_available %}
+            <li class="nav-item" role="presentation">
+              <button class="nav-link {% if default_format == 'yaml' %}active{% endif %}"
+                      id="cot-export-yaml-tab" data-bs-toggle="tab"
+                      data-bs-target="#cot-export-yaml" type="button" role="tab"
+                      aria-controls="cot-export-yaml"
+                      aria-selected="{% if default_format == 'yaml' %}true{% else %}false{% endif %}">
+                {% trans "YAML" %}
+              </button>
+            </li>
+            {% endif %}
+          </ul>
+
+          <div class="tab-content border border-top-0 rounded-bottom p-3">
+            {% if yaml_available %}
+            <div class="tab-pane fade {% if default_format == 'yaml' %}show active{% endif %}"
+                 id="cot-export-yaml" role="tabpanel" aria-labelledby="cot-export-yaml-tab">
+              <div class="d-flex justify-content-end mb-2">
+                <button type="button" class="btn btn-sm btn-outline-secondary cot-copy-btn"
+                        data-copy-target="cot-export-yaml-text">
+                  <i class="mdi mdi-content-copy"></i> {% trans "Copy" %}
+                </button>
+              </div>
+              <pre class="mb-0"><code id="cot-export-yaml-text">{{ schema_yaml }}</code></pre>
+            </div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      document.querySelectorAll('.cot-copy-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var el = document.getElementById(btn.dataset.copyTarget);
+          if (!el) { return; }
+          var text = el.textContent;
+          var done = function () {
+            var original = btn.innerHTML;
+            btn.innerHTML = '<i class="mdi mdi-check"></i> {% trans "Copied" %}';
+            setTimeout(function () { btn.innerHTML = original; }, 1500);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () {});
+          }
+        });
+      });
+    })();
+  </script>
+{% endblock %}

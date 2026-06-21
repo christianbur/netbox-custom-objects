@@ -1,6 +1,7 @@
 from django import template
 from extras.choices import CustomFieldTypeChoices, CustomFieldUIVisibleChoices
 
+from netbox_custom_objects.choices import CustomObjectFieldTypeChoices
 from netbox_custom_objects.models import CustomObjectTypeField
 
 __all__ = (
@@ -13,7 +14,10 @@ __all__ = (
 
 register = template.Library()
 
-custom_field_type_verbose_names = {c[0]: c[1] for c in CustomFieldTypeChoices.CHOICES}
+# Use the plugin's own ChoiceSet so the plugin-only ``object_proxy`` type is
+# included; falling back to the raw value keeps rendering robust for any future
+# type that isn't in the map.
+custom_field_type_verbose_names = {c[0]: c[1] for c in CustomObjectFieldTypeChoices.CHOICES}
 
 
 @register.filter(name="get_field_object_type")
@@ -23,12 +27,18 @@ def get_field_object_type(field: CustomObjectTypeField) -> str:
 
 @register.filter(name="get_field_type_verbose_name")
 def get_field_type_verbose_name(field: CustomObjectTypeField) -> str:
-    return custom_field_type_verbose_names[field.type]
+    return custom_field_type_verbose_names.get(field.type, field.type)
 
 
 @register.filter(name="get_field_value")
 def get_field_value(obj, field: CustomObjectTypeField):
-    return getattr(obj, field.name)
+    value = getattr(obj, field.name)
+    if field.type == CustomFieldTypeChoices.TYPE_SELECT and value:
+        return getattr(obj, f'get_{field.name}_display')() or value
+    if field.type == CustomFieldTypeChoices.TYPE_MULTISELECT and value:
+        choices_dict = dict(obj._meta.get_field(field.name).base_field.choices)
+        return [choices_dict.get(v, v) for v in value]
+    return value
 
 
 @register.filter(name="get_field_is_ui_visible")

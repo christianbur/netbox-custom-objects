@@ -1,0 +1,22 @@
+{% extends "generic/object_list.html" %}
+{% load buttons %}
+{% load i18n %}
+
+{% block title %}{{ group_name }}{% endblock %}
+
+{% block tabs %}
+  {% include "netbox_custom_objects/inc/group_list_tabs.html" %}
+{% endblock tabs %}
+
+{% block controls %}
+  <div class="btn-list">
+    {% block extra_controls %}{% endblock %}
+    {% action_buttons actions model %}
+  </div>
+{% endblock controls %}
+
+{% block bulk_buttons %}
+  <div class="bulk-action-buttons">
+    {% action_buttons actions model multi=True %}
+  </div>
+{% endblock bulk_buttons %}

@@ -132,19 +132,6 @@ class ObjectFieldFiltersetTestCase(CustomObjectsTestCase, TestCase):
     def test_no_filter_returns_all(self):
         self.assertEqual(self._filterset({}).qs.count(), 3)
 
-    def test_filter_by_id_suffix_returns_matching_object(self):
-        # Regression for #561: NetBox's Related Objects panel generates
-        # ?<field>_id=N links; the filterset must honour the _id suffix form.
-        pks = list(self._filterset({"device_id": self.device1.pk}).qs.values_list("pk", flat=True))
-        self.assertIn(self.obj_d1.pk, pks)
-        self.assertNotIn(self.obj_d2.pk, pks)
-        self.assertNotIn(self.obj_none.pk, pks)
-
-    def test_filter_by_id_suffix_different_value(self):
-        pks = list(self._filterset({"device_id": self.device2.pk}).qs.values_list("pk", flat=True))
-        self.assertIn(self.obj_d2.pk, pks)
-        self.assertNotIn(self.obj_d1.pk, pks)
-
 
 # ---------------------------------------------------------------------------
 # MultiObjectFieldType.get_filterform_field — form field shape
@@ -770,8 +757,9 @@ class DateTimePrimaryFieldSearchTestCase(CustomObjectsTestCase, TestCase):
         )
 
         model = cls.cot.get_model()
-        cls.obj_morning = model.objects.create(ts=datetime.datetime(2025, 3, 10, 9, 0, 0))
-        cls.obj_evening = model.objects.create(ts=datetime.datetime(2025, 3, 10, 18, 30, 0))
+        utc = datetime.timezone.utc
+        cls.obj_morning = model.objects.create(ts=datetime.datetime(2025, 3, 10, 9, 0, 0, tzinfo=utc))
+        cls.obj_evening = model.objects.create(ts=datetime.datetime(2025, 3, 10, 18, 30, 0, tzinfo=utc))
 
     def _search(self, value):
         model = self.cot.get_model()

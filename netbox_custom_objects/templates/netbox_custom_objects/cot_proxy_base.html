@@ -1,0 +1,36 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+
+{% block title %}{{ cot.get_verbose_name_plural|default:cot.name }}{% endblock %}
+
+{% block page %}
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <h1 class="page-title mb-0">{{ cot.get_verbose_name_plural|default:cot.name }}</h1>
+    {% if cot.is_proxy %}
+      <span class="badge text-bg-grey" title="{% trans 'This Custom Object Type is read-only (object proxy).' %}">
+        <i class="mdi mdi-link-variant"></i> {% trans "Object Proxy" %}
+      </span>
+    {% endif %}
+  </div>
+  {% if cot.description %}
+    <p class="text-secondary">{{ cot.description }}</p>
+  {% endif %}
+
+  {% include 'netbox_custom_objects/inc/cot_view_tabs.html' %}
+
+  {% block alerts %}{% endblock %}
+  {% block content %}
+    {% block proxy_content %}
+      {% if proxy_no_view %}
+        <div class="alert alert-warning" role="alert">
+          <i class="mdi mdi-alert"></i>
+          {% blocktrans trimmed %}
+            This object proxy type has no usable COT view assigned. Assign a registered
+            view in the type's <em>Views</em> field (and restart the workers if the view
+            comes from a recently enabled bundle).
+          {% endblocktrans %}
+        </div>
+      {% endif %}
+    {% endblock %}
+  {% endblock %}
+{% endblock page %}

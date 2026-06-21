@@ -38,6 +38,18 @@
             <td>{{ object.description|placeholder }}</td>
           </tr>
           <tr>
+            <th scope="row">{% trans "Menu name" %}</th>
+            <td>{{ object.menu_name|placeholder }}</td>
+          </tr>
+          <tr>
+            <th scope="row">{% trans "Link table (show connected objects)" %}</th>
+            <td>{% checkmark object.link_table %}</td>
+          </tr>
+          <tr>
+            <th scope="row">{% trans "Views" %}</th>
+            <td>{{ object.views|placeholder }}</td>
+          </tr>
+          <tr>
             <th scope="row">{% trans "Last activity" %}</th>
             <td>
               {{ latest_change.time|isodatetime|placeholder }}
@@ -47,6 +59,16 @@
             </td>
           </tr>
         </table>
+      </div>
+      <div class="card">
+        <h5 class="card-header">{% trans "Metadata (YAML/JSON)" %}</h5>
+        <div class="card-body">
+          {% if object.metadata %}
+            <pre class="mb-0"><code>{{ object.metadata }}</code></pre>
+          {% else %}
+            <span class="text-muted">{% trans "None" %}</span>
+          {% endif %}
+        </div>
       </div>
       {% include 'inc/panels/tags.html' %}
       {% include 'inc/panels/custom_fields.html' %}
@@ -58,7 +80,7 @@
       <div class="card">
         <h2 class="card-header">Fields</h2>
         <table class="table table-hover attr-table">
-            {% for group_name, group_fields in field_groups.items %}
+            {% for group_name, group_fields in field_groups %}
               {% if group_name %}
                 <tr class="table-group-header">
                   <th scope="row" colspan="7" class="fw-bold">{{ group_name }}</th>
@@ -102,10 +124,10 @@
                   <td>
                   <span class="btn-group dropdown">
                       <a class="btn btn-sm btn-warning" href="{% url 'plugins:netbox_custom_objects:customobjecttypefield_edit' pk=field.pk %}?return_url={{ object.get_absolute_url }}" type="button"
-                         aria-label="{attrs.title}"><i class="mdi mdi-pencil"></i></a>
+                         aria-label="{% trans 'Edit' %}"><i class="mdi mdi-pencil"></i></a>
                       <a class="btn btn-sm btn-warning dropdown-toggle" type="button" data-bs-toggle="dropdown"
                       style="padding-left: 2px">
-                      <span class="visually-hidden">{toggle_text}</span></a>
+                      <span class="visually-hidden">{% trans 'Toggle Dropdown' %}</span></a>
                       <ul class="dropdown-menu">
                           <li><a class="dropdown-item" href="{% url 'plugins:netbox_custom_objects:customobjecttypefield_delete' pk=field.pk %}?return_url={{ object.get_absolute_url }}">
                           <i class="mdi mdi-trash-can-outline"></i> Delete</a></li>

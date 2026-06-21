@@ -2,6 +2,14 @@
 {% load plugins %}
 {% load custom_object_buttons %}
 
+{% block tabs %}
+  {% if cot_tabs %}
+    {% include 'netbox_custom_objects/inc/cot_view_tabs.html' %}
+  {% else %}
+    {{ block.super }}
+  {% endif %}
+{% endblock tabs %}
+
 {% block controls %}
   <div class="btn-list">
     {% plugin_list_buttons model %}

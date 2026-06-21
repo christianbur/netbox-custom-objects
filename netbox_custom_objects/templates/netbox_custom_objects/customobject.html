@@ -9,9 +9,7 @@
 {% load tabs %}
 {% load i18n %}
 {% load custom_object_utils %}
-
-{% block extra_controls %}
-{% endblock %}
+{% load custom_object_tab_tags %}
 
 {% block breadcrumbs %}
 <li class="breadcrumb-item"><a href="{{ object.get_list_url }}">{{ object.custom_object_type.get_verbose_name_plural }}</a></li>
@@ -38,6 +36,7 @@
 {% block controls %}
 <div class="btn-list justify-content-end mb-2">
     {% block control-buttons %}
+      {% block extra_controls %}{% endblock %}
       {# Default buttons #}
       {% if perms.extras.add_bookmark and object.bookmarks %}
         {% custom_object_bookmark_button object %}
@@ -73,6 +72,17 @@
     <li class="nav-item">
       <a class="nav-link{% if not tab %} active{% endif %}" href="{{ object.get_absolute_url }}">{{ object.custom_object_type.get_verbose_name }}</a>
     </li>
+    {# Combined "Custom Objects" tab — rendered live from the DB so a CO→CO reference gets a tab with no restart. #}
+    {% custom_objects_tab_link object %}
+    {# Per-menu_name tabs (CustomObjectTypes with a menu_name) — also rendered live from the DB. #}
+    {% custom_objects_menu_tab_links object %}
+    {# COT view tabs — dynamically bound via CustomObjectType.views. #}
+    {% cot_view_tab_links object %}
+    {# Other registered model-view tabs (journal/changelog/custom_objects are excluded by the tag, rendered by hand). #}
+    {% plugin_extra_tabs object %}
+    <li class="nav-item">
+      <a class="nav-link{% if tab == 'contacts' %} active{% endif %}" href="{% url 'plugins:netbox_custom_objects:customobject_contacts' object.custom_object_type.slug object.pk %}">{% trans "Contacts" %}</a>
+    </li>
     <li class="nav-item">
       <a class="nav-link{% if tab == 'journal' %} active{% endif %}" href="{% url 'plugins:netbox_custom_objects:customobject_journal' object.custom_object_type.slug object.pk %}">{% trans "Journal" %}</a>
     </li>
@@ -102,7 +112,7 @@
               {% endif %}
             </td>
           </tr>
-          {% for group_name, group_fields in field_groups.items %}
+          {% for group_name, group_fields in field_groups %}
             {% if group_name %}
               <tr class="table-group-header">
                 <th scope="row" colspan="2" class="fw-bold">{{ group_name }}</th>
@@ -123,7 +133,9 @@
                       {% endif %}
                     </th>
                     <td>
-                      {% customfield_value field object|get_field_value:field %}
+                      {% with customfield=field value=object|get_field_value:field %}
+                        {% include "builtins/customfield_value.html" %}
+                      {% endwith %}
                     </td>
                   </tr>
                 {% endif %}
@@ -137,7 +149,7 @@
     <div class="col col-md-6">
       {% include 'inc/panels/tags.html' %}
       {% plugin_right_page object %}
-      {% for group_name, group_fields in field_groups.items %}
+      {% for group_name, group_fields in field_groups %}
         {% for field in group_fields %}
           {% if field.many %}
             {% with field_values=object|get_child_relations:field is_visible_in_ui=object|get_field_is_ui_visible:field %}

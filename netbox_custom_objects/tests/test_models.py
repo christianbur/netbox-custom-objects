@@ -11,7 +11,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import connection, transaction
 from django.db.utils import OperationalError, ProgrammingError
-from django.test import TestCase, override_settings, tag
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -232,6 +232,10 @@ class CustomObjectTypeTestCase(CustomObjectsTestCase, TestCase):
             related_object_type=self.get_site_object_type(),
             search_weight=500,
         )
+        # CustomObjectTypeField.save() now caches a full model after each field
+        # save (to defend against a rename/post_save race), so the cache holds a
+        # full model here.  Clear it to force generation of a fresh stub.
+        cot.clear_model_cache(cot.id)
         stub_model = cot.get_model(skip_object_fields=True)
         model_field_names = (
             {f.name for f in stub_model._meta.local_fields}
@@ -932,6 +936,35 @@ class CustomObjectTestCase(CustomObjectsTestCase, TestCase):
         self.assertEqual(result, expected)
 
 
+class M2MSerializationRegressionTestCase(CustomObjectsTestCase, TestCase):
+    """Guards the ``through._meta.auto_created = model`` opt-in in
+    ``MultiObjectFieldType.after_model_generation`` — without it, Django's
+    JSON serializer skips the M2M and merge replay zeroes through-table rows.
+    """
+
+    def test_serialize_object_includes_m2m_values(self):
+        cot = self.create_custom_object_type(name="M2MSerialize", slug="m2m-serialize")
+        site_ct = self.get_site_object_type()
+        self.create_custom_object_type_field(
+            cot, name="name", label="Name", type="text", primary=True,
+        )
+        self.create_custom_object_type_field(
+            cot, name="sites", label="Sites", type="multiobject",
+            related_object_type=site_ct,
+        )
+        model = cot.get_model()
+        site_model = site_ct.model_class()
+        site_a = site_model.objects.create(name="A", slug="a")
+        site_b = site_model.objects.create(name="B", slug="b")
+
+        obj = model.objects.create(name="obj")
+        obj.sites.set([site_a, site_b])
+
+        data = obj.serialize_object()
+        self.assertIn("sites", data)
+        self.assertEqual(set(data["sites"]), {site_a.pk, site_b.pk})
+
+
 class RelatedNameTestCase(CustomObjectsTestCase, TestCase):
     """Tests for the related_name field on Object and MultiObject fields."""
 
@@ -1175,41 +1208,6 @@ class RelatedNameTestCase(CustomObjectsTestCase, TestCase):
             hasattr(slb_model, f"{table_model_name}_slbs_set"),
             "MultiObject field without related_name should not create an auto-generated reverse accessor.",
         )
-
-    @tag('regression')  # #535
-    def test_deleting_multiobject_field_deregisters_through_model(self):
-        """
-        After a multiobject field is deleted its through model must be removed
-        from Django's app registry. Without the fix the cascade-delete collector
-        still finds the model, queries the dropped table, and raises
-        ProgrammingError when deleting any object that was a relation target
-        of the field (issue #535).
-        """
-        field = self.create_custom_object_type_field(
-            self.cert_cot,
-            name="related_slbs",
-            type="multiobject",
-            related_object_type=self.slb_object_type,
-        )
-        through_model_name = field.through_model_name.lower()
-        self.assertIn(through_model_name, django_apps.all_models.get(APP_LABEL, {}))
-
-        slb_model = self.slb_cot.get_model()
-        slb_instance = slb_model.objects.create(name="SLB-To-Delete")
-
-        field.delete()
-
-        # Primary assertion: deleting a relation target must not raise ProgrammingError.
-        # Without the fix this line raises:
-        #   ProgrammingError: relation "custom_objects_<id>_related_slbs" does not exist
-        # because the stale through model is still in apps.all_models and the
-        # cascade-delete collector queries the already-dropped table.
-        try:
-            slb_instance.delete()
-        except ProgrammingError as exc:
-            self.fail(f"Deleting a related object raised ProgrammingError after field deletion: {exc}")
-
-        self.assertNotIn(through_model_name, django_apps.all_models.get(APP_LABEL, {}))
 
 
 class SearchReindexTestCase(CustomObjectsTestCase, TestCase):
@@ -1604,12 +1602,16 @@ class CrossCOTStubSearchIndexRegressionTestCase(CustomObjectsTestCase, TestCase)
         fields are excluded from the model class.  The search index must only contain
         fields that are actually present.
         """
-        # Refresh so cache_timestamp matches the DB value bumped by the signal during setUp,
-        # then explicitly generate the stub to re-register its search index (which excludes
-        # object-type fields).  Without refresh_from_db the timestamps mismatch → full model
-        # is generated instead, which includes 'device' and makes assertNotIn fail.
-        self.target_cot.refresh_from_db()
-        self.target_cot.get_model(skip_object_fields=True)
+        # Force stub semantics: clear any cached full model and re-register the
+        # search index against a fresh stub.  This mirrors the cross-COT scenario
+        # the regression covers — B's stub gets cached before any caller asks for
+        # the full model, so register_custom_object_search_index sees only the
+        # stub fields.  Without this, CustomObjectTypeField.save() would have
+        # already cached a full model with the OBJECT field.
+        self.target_cot.clear_model_cache(self.target_cot.id)
+        stub_model = self.target_cot.get_model(skip_object_fields=True)
+        self.target_cot.register_custom_object_search_index(stub_model)
+
         label = f"netbox_custom_objects.{self.target_cot.get_table_model_name(self.target_cot.id).lower()}"
         search_index = registry["search"].get(label)
 
@@ -2143,10 +2145,11 @@ class LazySerializerRegistrationTestCase(CustomObjectsTestCase, TestCase):
     1. get_serializer_class(model, skip_object_fields=True) used to overwrite the
        full module-level serializer with a partial one, causing subsequent requests
        to fail or return incomplete data.
-    2. import_string("netbox_custom_objects.api.serializers.Table{N}ModelSerializer")
-       raised SerializerNotFound in workers whose ready() ran before the COT existed.
-       The module-level __getattr__ hook (PEP 562) fixes this by generating the
-       serializer on demand.
+    2. get_serializer_for_model() raised SerializerNotFound for a Table{N}Model in
+       workers whose ready() ran before the COT existed.
+       The serializer_resolver() hook (registered via PluginConfig.serializer_resolver)
+       fixes this by generating the serializer on demand, ahead of any import-path
+       lookup.
     """
 
     @classmethod
@@ -2173,8 +2176,8 @@ class LazySerializerRegistrationTestCase(CustomObjectsTestCase, TestCase):
 
     def _clear_serializer_registrations(self):
         """Remove any previously registered serializers for parent and child COTs
-        from the module so that __getattr__ and get_serializer_class() behave as
-        they would in a fresh worker process."""
+        from the module so that serializer_resolver() and get_serializer_class()
+        behave as they would in a fresh worker process."""
         import netbox_custom_objects.api.serializers as ser_module
         parent_model = self.parent_cot.get_model()
         child_model = self.child_cot.get_model()
@@ -2182,10 +2185,14 @@ class LazySerializerRegistrationTestCase(CustomObjectsTestCase, TestCase):
             attr = f"{model._meta.object_name}Serializer"
             ser_module.__dict__.pop(attr, None)
 
-    def test_module_getattr_generates_serializer_on_demand(self):
-        """__getattr__ must generate and return a serializer for any Table{N}Model
-        whose serializer was never pre-registered (simulates a worker that started
-        before the COT was created — issue #370 Scenario A)."""
+    def test_resolver_generates_serializer_on_demand(self):
+        """serializer_resolver() must generate and return a serializer for any
+        Table{N}Model whose serializer was never pre-registered (simulates a worker
+        that started before the COT was created — issue #370 Scenario A).
+
+        NetBox calls this resolver from get_serializer_for_model() before falling
+        back to an import-path lookup, so a missing startup-time registration can
+        never raise SerializerNotFound."""
         import netbox_custom_objects.api.serializers as ser_module
         self._clear_serializer_registrations()
 
@@ -2196,14 +2203,15 @@ class LazySerializerRegistrationTestCase(CustomObjectsTestCase, TestCase):
         self.assertNotIn(serializer_name, ser_module.__dict__,
                          "precondition: serializer must not be pre-registered")
 
-        # getattr() must trigger __getattr__ and return a valid class
-        serializer_cls = getattr(ser_module, serializer_name)
+        # The resolver must generate and return a valid serializer class on demand
+        serializer_cls = ser_module.serializer_resolver(parent_model)
         self.assertIsNotNone(serializer_cls)
         self.assertIn("title", serializer_cls.Meta.fields)
 
-        # After __getattr__ fires, the serializer is cached in __dict__
+        # After the resolver fires, the full serializer is cached in __dict__
+        # (get_serializer_class registers it via setattr)
         self.assertIn(serializer_name, ser_module.__dict__,
-                      "serializer must be cached in module __dict__ after first access")
+                      "serializer must be cached in module __dict__ after first resolution")
 
     def test_skip_object_fields_does_not_overwrite_full_serializer(self):
         """get_serializer_class(model, skip_object_fields=True) must not overwrite

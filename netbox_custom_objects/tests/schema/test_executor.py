@@ -319,6 +319,57 @@ class ExecutorCOTAttrsTestCase(_ExecutorTestBase):
 
 
 # ---------------------------------------------------------------------------
+# COT enhancement attribute round-trip (link_table / menu_name / metadata)
+# ---------------------------------------------------------------------------
+
+class ExecutorEnhancementAttrsRoundTripTestCase(_ExecutorTestBase):
+    """link_table, menu_name and metadata survive an export → apply round-trip,
+    on both the create (new COT) and update (existing COT) paths."""
+
+    def test_update_existing_cot_round_trips_attrs(self):
+        cot = self.create_custom_object_type(name='enhupd', slug='enh-upd')
+        type_def = export_cot(cot)
+        type_def["link_table"] = True
+        type_def["menu_name"] = "Firewall"
+        type_def["metadata"] = "key: value\nlist:\n  - a\n  - b"
+        apply_document({"schema_version": "1", "types": [type_def]})
+        cot.refresh_from_db()
+        self.assertTrue(cot.link_table)
+        self.assertEqual(cot.menu_name, "Firewall")
+        self.assertEqual(cot.metadata, "key: value\nlist:\n  - a\n  - b")
+
+    def test_create_new_cot_round_trips_attrs(self):
+        # Source COT carries the three attributes; export then re-key to a fresh
+        # slug/name so apply() exercises the CREATE path against a clean state.
+        source = self.create_custom_object_type(
+            name='enhsrc', slug='enh-src',
+            link_table=True, menu_name='Security', metadata='owner: net-team',
+        )
+        type_def = export_cot(source)
+        # Sanity: the export carries the three values.
+        self.assertEqual(type_def["link_table"], True)
+        self.assertEqual(type_def["menu_name"], "Security")
+        self.assertEqual(type_def["metadata"], "owner: net-team")
+
+        type_def["name"] = "enhdst"
+        type_def["slug"] = "enh-dst"
+        apply_document({"schema_version": "1", "types": [type_def]})
+
+        created = CustomObjectType.objects.get(slug="enh-dst")
+        self.assertTrue(created.link_table)
+        self.assertEqual(created.menu_name, "Security")
+        self.assertEqual(created.metadata, "owner: net-team")
+
+    def test_link_table_false_round_trips_without_change(self):
+        # A False link_table must not be coerced into a spurious diff.
+        cot = self.create_custom_object_type(
+            name='enhfalse', slug='enh-false', menu_name='Keep',
+        )
+        diffs = apply_document({"schema_version": "1", "types": [export_cot(cot)]})
+        self.assertNotIn("link_table", diffs[0].cot_changes)
+
+
+# ---------------------------------------------------------------------------
 # Field ADD
 # ---------------------------------------------------------------------------
 

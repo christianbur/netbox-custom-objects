@@ -6,7 +6,12 @@ from unittest.mock import patch
 from django.test import TestCase
 
 from netbox_custom_objects import CustomObjectsPluginConfig
-from netbox_custom_objects.navigation import get_grouped_menu_items, CustomObjectTypeMenuItems
+from netbox_custom_objects.navigation import (
+    CustomObjectTypeMenuItems,
+    _menu_name_groups,
+    get_grouped_menu_items,
+    uses_group_list_page,
+)
 from .base import CustomObjectsTestCase
 
 
@@ -92,3 +97,83 @@ class GetGroupedMenuItemsTest(CustomObjectsTestCase, TestCase):
         self.assertIn("alpha", group_names)
         self.assertIn("beta", group_names)
         self.assertEqual(len(groups), 2)
+
+
+class MenuNameGroupNavigationTest(CustomObjectsTestCase, TestCase):
+    """Tests for menu_name menus when group_name is also set."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch.object(CustomObjectsPluginConfig, "should_skip_dynamic_model_creation", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_uses_group_list_page_when_both_names_set(self):
+        cot = self.create_custom_object_type(
+            name="Grouped",
+            slug="grouped",
+            group_name="Policies",
+            menu_name="Security",
+        )
+        self.assertTrue(uses_group_list_page(cot))
+
+    def test_does_not_use_group_list_page_without_menu_name(self):
+        cot = self.create_custom_object_type(
+            name="Grouped",
+            slug="grouped",
+            group_name="Policies",
+        )
+        self.assertFalse(uses_group_list_page(cot))
+
+    def test_menu_name_group_yields_summary_links_not_cot_entries(self):
+        self.create_custom_object_type(
+            name="Policy A",
+            slug="policy-a",
+            group_name="Policies",
+            menu_name="Security",
+        )
+        self.create_custom_object_type(
+            name="Policy B",
+            slug="policy-b",
+            group_name="Policies",
+            menu_name="Security",
+        )
+
+        groups = _menu_name_groups("Security")
+        objects_group = next((items for label, items in groups if label == "Objects"), None)
+        self.assertIsNotNone(objects_group)
+        menu_items = list(objects_group)
+        self.assertEqual(len(menu_items), 1)
+        self.assertEqual(menu_items[0].link_text, "Policies")
+        self.assertIn("groups/Security/Policies", str(menu_items[0].url))
+
+    def test_menu_name_objects_group_skips_grouped_cots(self):
+        self.create_custom_object_type(
+            name="Grouped",
+            slug="grouped",
+            group_name="Policies",
+            menu_name="Security",
+        )
+        ungrouped = self.create_custom_object_type(
+            name="Standalone",
+            slug="standalone",
+            menu_name="Security",
+        )
+
+        groups = _menu_name_groups("Security")
+        objects_items = next(items for label, items in groups if label == "Objects")
+        menu_items = list(objects_items)
+        self.assertEqual(len(menu_items), 1)
+        self.assertIn(ungrouped.slug, str(menu_items[0].url))
+
+    def test_menu_name_with_group_not_in_stock_menu_groups(self):
+        self.create_custom_object_type(
+            name="Grouped",
+            slug="grouped",
+            group_name="Policies",
+            menu_name="Security",
+        )
+
+        stock_groups = get_grouped_menu_items()
+        self.assertEqual(stock_groups, [])
+

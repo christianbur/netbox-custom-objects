@@ -52,6 +52,7 @@ from netbox_custom_objects.models import CustomObjectType
 if TYPE_CHECKING:
     from django.contrib.contenttypes.models import ContentType
 from netbox_custom_objects.schema.format import (
+    COT_ATTR_DEFAULTS,
     CUSTOM_OBJECTS_APP_LABEL_SLUG,
     FIELD_BASE_ATTRS,
     FIELD_DEFAULTS,
@@ -60,8 +61,10 @@ from netbox_custom_objects.schema.format import (
 )
 
 
-# COT-level attributes that may change between schema versions.
-# Each maps to its schema-absent default (empty string).
+# COT-level string attributes that may change between schema versions.
+# Each treats a schema-absent value as the empty string.  Only string fields
+# belong here — boolean/numeric COT attributes are compared explicitly in
+# _compare_cot_attrs (a falsy "" coercion would swallow values like False).
 _COT_ATTRS = (
     "name",
     "version",
@@ -69,6 +72,9 @@ _COT_ATTRS = (
     "verbose_name_plural",
     "description",
     "group_name",
+    "menu_name",
+    "metadata",
+    "views",
 )
 
 
@@ -285,6 +291,14 @@ def _compare_cot_attrs(cot, type_def: dict) -> dict[str, tuple]:
         schema_val = type_def.get(attr) or ""
         if db_val != schema_val:
             changes[attr] = (db_val, schema_val)
+
+    # link_table is boolean — compare explicitly so a False value is not
+    # coerced away by the `or ""` convention used for string attributes.
+    db_link_table = bool(getattr(cot, "link_table", COT_ATTR_DEFAULTS["link_table"]))
+    schema_link_table = bool(type_def.get("link_table", COT_ATTR_DEFAULTS["link_table"]))
+    if db_link_table != schema_link_table:
+        changes["link_table"] = (db_link_table, schema_link_table)
+
     return changes
 
 

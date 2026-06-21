@@ -32,19 +32,20 @@ $ ./manage.py migrate
 sudo systemctl restart netbox netbox-rq
 ```
 
-> [!NOTE]
-> If you are using NetBox Custom Objects with NetBox Branching, you need to insert the following into your `configuration.py`. See the docs for a full description of how NetBox Custom Objects currently works with NetBox Branching.  
+## Related Objects Tab
 
-```
-PLUGINS_CONFIG = {
-    'netbox_branching': {
-        'exempt_models': [
-            'netbox_custom_objects.customobjecttype',
-            'netbox_custom_objects.customobjecttypefield',
-        ],
-    },
-}
-```
+When a Custom Object Type has an Object or Multi-object field that points at another model — a built-in NetBox model such as Device or Site, or another Custom Object Type — a **Custom Objects** tab is added to the detail page of every referenced object. The tab lists all custom objects that link to the object being viewed, across every referencing field and type, with:
+
+- a badge showing the linked-object count (the tab hides itself when there are none),
+- search, plus type and tag filters, and sortable columns,
+- HTMX-driven pagination and per-user column configuration,
+- per-row edit/delete actions.
+
+Discovery is automatic and requires no configuration; both non-polymorphic and polymorphic Object/Multi-object fields are supported. The tab supersedes the older "Custom Objects linking to this object" panel — it surfaces the same relationships and, unlike the panel, enforces per-Custom-Object-Type view permissions on the rows it lists.
+
+The tab is fully live: no NetBox restart is needed for any everyday change. Defining a new Custom Object Type, adding a field that references a model nothing referenced before, and creating, editing, or deleting custom objects are all reflected on the next page load.
+
+> **Note:** the badge count is filtered to the viewing user's permissions, so it reflects the rows that user can actually open — and the tab hides itself entirely when the user may view none of the linked objects.
 
 ## Known Limitations
 

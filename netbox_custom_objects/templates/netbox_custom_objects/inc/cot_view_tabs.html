@@ -1,0 +1,10 @@
+{% load i18n %}
+{% if cot_tabs %}
+  <ul class="nav nav-tabs" role="tablist">
+    {% for tab in cot_tabs %}
+      <li class="nav-item" role="presentation">
+        <a class="nav-link{% if tab.active %} active{% endif %}" href="{{ tab.url }}">{{ tab.label }}</a>
+      </li>
+    {% endfor %}
+  </ul>
+{% endif %}

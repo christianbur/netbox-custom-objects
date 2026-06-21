@@ -5,7 +5,6 @@ import sys
 from core.models import ObjectType
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
-from django.db.utils import OperationalError, ProgrammingError
 from django.urls import NoReverseMatch
 from django.utils.translation import gettext_lazy as _
 from extras.choices import CustomFieldTypeChoices
@@ -326,12 +325,17 @@ class CustomObjectTypeSerializer(NetBoxModelSerializer):
         fields = [
             "id",
             "url",
+            "display",
             "name",
             "verbose_name",
             "verbose_name_plural",
             "slug",
             "version",
             "group_name",
+            "menu_name",
+            "link_table",
+            "metadata",
+            "views",
             "description",
             "tags",
             "created",
@@ -342,7 +346,7 @@ class CustomObjectTypeSerializer(NetBoxModelSerializer):
             "object_type_name",
         ]
         read_only_fields = ("schema_document",)
-        brief_fields = ("id", "url", "name", "slug", "description")
+        brief_fields = ("id", "url", "display", "name", "slug", "description", "menu_name")
 
     def get_table_model_name(self, obj):
         return obj.get_table_model_name(obj.id)
@@ -543,13 +547,6 @@ def get_serializer_class(model, skip_object_fields=False):
     def create(self, validated_data):
         ModelClass = self.Meta.model
 
-        # taggit's TaggableManager is not detected by model_meta.get_field_info() as a
-        # standard M2M relation.  If left in validated_data it gets passed to
-        # Model._default_manager.create(), where Django's __init__ sets it as a plain
-        # instance attribute (shadowing the manager), giving the illusion of success but
-        # never persisting to the DB.  Pop it here and save via taggit's own API.
-        tags = validated_data.pop('tags', None)
-
         info = model_meta.get_field_info(ModelClass)
         many_to_many = {}
         for field_name, relation_info in info.relations.items():
@@ -570,16 +567,10 @@ def get_serializer_class(model, skip_object_fields=False):
 
         instance = ModelClass._default_manager.create(**validated_data)
 
-        if tags is not None:
-            instance._tags = tags
-            instance.tags.set([t.name for t in tags])
-        else:
-            instance._tags = []
-
         if many_to_many:
             for field_name, value in many_to_many.items():
                 field = getattr(instance, field_name)
-                field.set(value if value is not None else [])
+                field.set(value)
 
         for field_name, value in poly_gfk.items():
             setattr(instance, field_name, value)
@@ -594,11 +585,6 @@ def get_serializer_class(model, skip_object_fields=False):
 
     # Stock DRF update() with custom field.set() for M2M
     def update(self, instance, validated_data):
-        # Pop tags before the setattr loop — taggit's manager has no __set__, so
-        # leaving tags in validated_data would shadow the manager with a plain list.
-        tags = validated_data.pop('tags', None)
-        instance._tags = tags or []
-
         info = model_meta.get_field_info(instance)
 
         # Pop polymorphic GFK fields
@@ -625,13 +611,9 @@ def get_serializer_class(model, skip_object_fields=False):
 
         instance.save()
 
-        if tags is not None:
-            instance._tags = tags
-            instance.tags.set([t.name for t in tags])
-
         for attr, value in m2m_fields:
             field = getattr(instance, attr)
-            field.set(value if value is not None else [], clear=True)
+            field.set(value, clear=True)
 
         for field_name, value in poly_m2m.items():
             mgr = getattr(instance, field_name)
@@ -716,7 +698,8 @@ def get_serializer_class(model, skip_object_fields=False):
     )
 
     # Register the FULL serializer as a module attribute so NetBox's import_string()
-    # and the module-level __getattr__ fallback can find it.
+    # can find it (the serializer_resolver below generates on demand; this keeps
+    # any direct import-path lookups working too).
     # The partial variant (skip_object_fields=True) is used only as a nested field
     # descriptor inside another serializer class and must NOT be stored on the module
     # — doing so would silently replace the full serializer with an incomplete one
@@ -729,35 +712,23 @@ def get_serializer_class(model, skip_object_fields=False):
     return serializer
 
 
-def __getattr__(name):
-    """
-    Module-level lazy resolution for Table{N}ModelSerializer attributes (PEP 562).
+def serializer_resolver(model, prefix=''):
+    """Resolve dynamic CO models (``table{n}model``) to on-the-fly serializers.
 
-    NetBox's get_serializer_for_model() resolves serializers via
-    import_string("netbox_custom_objects.api.serializers.TableNModelSerializer"),
-    which ultimately calls getattr(module, name).  That lookup hits this hook
-    when the attribute has not yet been registered — for example in a worker
-    whose ready() ran against an empty database, or in any worker that started
-    before a given COT was created.
+    Called by ``utilities.api.get_serializer_for_model`` before its default
+    import-path lookup.  Returns ``None`` for non-CO models so the default
+    lookup runs (including this plugin's static CustomObjectType serializer).
 
-    Generating on demand here means SerializerNotFound is never raised just
-    because startup-time registration was skipped or missed (issue #370).
-    The generated serializer is stored via setattr inside get_serializer_class(),
-    so subsequent lookups return it directly from __dict__ without re-entering
-    this hook.
+    This supersedes the import-path/``__getattr__`` fallback approach: because
+    the resolver runs before any import path is built for a CO model, the
+    serializer is always generated on demand and ``SerializerNotFound`` is never
+    raised just because startup-time registration was skipped or missed
+    (issue #370).
     """
-    match = re.match(r'^Table(\d+)ModelSerializer$', name)
-    if match:
-        cot_id = int(match.group(1))
-        try:
-            obj = CustomObjectType.objects.get(pk=cot_id)
-            model = obj.get_model()
-            return get_serializer_class(model)
-        except (CustomObjectType.DoesNotExist, ProgrammingError, OperationalError, LookupError):
-            pass
-        except Exception:
-            logger.warning(
-                "Unexpected error generating serializer for %r; serializer will not be available",
-                name, exc_info=True,
-            )
-    raise AttributeError(f"module '{__name__}' has no attribute {name!r}")
+    if (
+        getattr(model, '_meta', None)
+        and model._meta.app_label == 'netbox_custom_objects'
+        and _TABLE_MODEL_PATTERN.match(model.__name__)
+    ):
+        return get_serializer_class(model)
+    return None

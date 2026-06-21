@@ -1,0 +1,20 @@
+{% load i18n helpers %}
+{# Used / Unused tabs for a COT group summary page, plus the standard Filters tab. #}
+<ul class="nav nav-tabs" role="tablist">
+  {% for tab in group_tabs %}
+    <li class="nav-item" role="presentation">
+      <a class="nav-link{% if tab.active %} active{% endif %}" href="{{ tab.url }}">
+        {{ tab.label }}
+        <span class="badge text-bg-secondary">{{ tab.count }}</span>
+      </a>
+    </li>
+  {% endfor %}
+  {% if filter_form %}
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" id="filters-form-tab" data-bs-toggle="tab" data-bs-target="#filters-form" type="button" role="tab" aria-controls="filters-form" aria-selected="false">
+        {% trans "Filters" %}
+        {% badge filter_form.changed_data|length bg_color="primary" %}
+      </button>
+    </li>
+  {% endif %}
+</ul>

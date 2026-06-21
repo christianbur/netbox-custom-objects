@@ -1,9 +1,23 @@
 {% extends 'generic/object_edit.html' %}
 {% load i18n %}
 
+{% block tabs %}
+  <ul class="nav nav-tabs">
+    <li class="nav-item" role="presentation">
+      <button class="nav-link active" id="edit-form-tab" data-bs-toggle="tab" data-bs-target="#edit-form" type="button" role="tab" aria-controls="edit-form" aria-selected="true">
+        {% if object.pk %}{% trans "Edit" %}{% else %}{% trans "Create" %}{% endif %}
+      </button>
+    </li>
+    {% if not object.pk %}
+    <li class="nav-item" role="presentation">
+      <a class="nav-link" href="{% url 'plugins:netbox_custom_objects:customobjecttype_define' %}">
+        {% trans "JSON import" %}
+      </a>
+    </li>
+    {% endif %}
+  </ul>
+{% endblock tabs %}
+
 {% block form %}
-  {% if branch_bypass_warning %}
-    {% include 'netbox_custom_objects/inc/branch_bypass_warning.html' %}
-  {% endif %}
   {{ block.super }}
 {% endblock form %}

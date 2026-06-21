@@ -1,9 +1,4 @@
-import functools
-import json
 import logging
-from pathlib import Path
-
-import jsonschema
 
 from django.apps import apps as django_apps
 from django.contrib.contenttypes.models import ContentType
@@ -39,8 +34,7 @@ from netbox_custom_objects.schema.executor import (
     UnknownFieldTypeError,
     UnknownObjectTypeError,
 )
-from netbox_custom_objects.utilities import is_in_branch
-
+from netbox_custom_objects.schema.validation import schema_error_dicts
 from . import serializers
 
 logger = logging.getLogger(__name__)
@@ -49,31 +43,15 @@ logger = logging.getLogger(__name__)
 # Schema document helpers
 # ---------------------------------------------------------------------------
 
-_SCHEMA_FILE = Path(__file__).parent.parent / "schema" / "cot_schema_v1.json"
-
-
-@functools.lru_cache(maxsize=1)
-def _get_validator():
-    """Load the COT JSON Schema file and return a validator. Cached after first call."""
-    with open(_SCHEMA_FILE) as f:
-        schema = json.load(f)
-    return jsonschema.Draft202012Validator(schema)
-
 
 def _validate_schema_doc(schema_doc: dict) -> None:
     """
     Validate *schema_doc* against the COT schema v1 JSON Schema.
     Raises ``ValidationError`` (DRF 400) if validation fails.
     """
-    validator = _get_validator()
-    errors = sorted(validator.iter_errors(schema_doc), key=lambda e: list(e.path))
+    errors = schema_error_dicts(schema_doc)  # capped at 10 to avoid overwhelming responses
     if errors:
-        raise ValidationError({
-            "schema_errors": [
-                {"path": list(e.path), "message": e.message}
-                for e in errors[:10]  # cap at 10 to avoid overwhelming responses
-            ]
-        })
+        raise ValidationError({"schema_errors": errors})
 
 
 def _serialize_field_change(fc) -> dict:
@@ -100,10 +78,6 @@ def _serialize_diff(diff) -> dict:
         "field_changes": [_serialize_field_change(fc) for fc in diff.field_changes],
         "warnings": diff.warnings,
     }
-
-
-# Constants
-BRANCH_ACTIVE_ERROR_MESSAGE = _("Please switch to the main branch to perform this operation.")
 
 
 class RootView(APIRootView):
@@ -158,14 +132,9 @@ class CustomObjectViewSet(ETagMixin, ModelViewSet):
         return super().list(request, *args, **kwargs)
 
     def create(self, request, *args, **kwargs):
-        if is_in_branch():
-            raise ValidationError(BRANCH_ACTIVE_ERROR_MESSAGE)
         return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
-        if is_in_branch():
-            raise ValidationError(BRANCH_ACTIVE_ERROR_MESSAGE)
-
         # Replicate DRF's UpdateModelMixin.update() so we can snapshot the instance
         # before the serializer is constructed.  Calling super().update() would invoke
         # get_object() a second time and return a fresh, un-snapshotted instance.
@@ -415,13 +384,14 @@ class SchemaApplyView(APIView):
     permission_classes = [IsAuthenticatedOrLoginNotRequired, TokenWritePermission]
 
     def post(self, request, *args, **kwargs):
-        # TODO: Schema apply is blocked while in a branch context because the executor
-        # performs direct DDL (ALTER/DROP TABLE) that is not branch-aware.  When branching
-        # is extended to support schema operations, remove this guard and wire up the
-        # appropriate branch-scoped apply path.
-        if is_in_branch():
-            raise ValidationError(BRANCH_ACTIVE_ERROR_MESSAGE)
-
+        # Branch context: this endpoint no longer rejects requests with an active
+        # branch.  Schema-editor calls inside ``apply_document`` route through
+        # ``_get_schema_connection()`` in models.py, which selects the active
+        # branch's connection when one is set.  The resulting DDL therefore lands
+        # in the branch's PostgreSQL schema, and the CustomObjectType /
+        # CustomObjectTypeField writes flow through netbox-branching's router.
+        # See ``_schema_add_field`` / ``_schema_remove_field`` / ``_schema_alter_field``
+        # and ``CustomObjectType.save`` for the routing details.
         if not (
             request.user.has_perm('netbox_custom_objects.add_customobjecttype') and
             request.user.has_perm('netbox_custom_objects.change_customobjecttype')

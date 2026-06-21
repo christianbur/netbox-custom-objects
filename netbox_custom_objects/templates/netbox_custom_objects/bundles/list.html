@@ -1,0 +1,57 @@
+{% extends 'base/layout.html' %}
+{% load helpers %}
+{% load i18n %}
+
+{% block title %}{% trans "Bundles" %}{% endblock %}
+
+{% block content %}
+  <p class="text-muted">{% trans "Local path" %}: <code>{{ bundles_path }}</code></p>
+  <div class="card">
+    <h5 class="card-header">{% trans "Bundles" %}</h5>
+    <table class="table table-hover">
+      <thead>
+        <tr>
+          <th>{% trans "Name" %}</th>
+          <th>{% trans "Package" %}</th>
+          <th>{% trans "Status" %}</th>
+          <th>{% trans "Last error" %}</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for bundle in bundles %}
+          <tr>
+            <td><a href="{{ bundle.detail_url }}">{{ bundle.verbose_name }}</a><div class="small text-muted">{{ bundle.name }}</div></td>
+            <td><code>{{ bundle.package }}</code></td>
+            <td>
+              {% if bundle.enabled %}
+                <span class="badge text-bg-green">{% trans "Enabled" %}</span>
+              {% else %}
+                <span class="badge text-bg-grey">{% trans "Disabled" %}</span>
+              {% endif %}
+            </td>
+            <td>{% if bundle.last_error %}<span class="text-danger small">{{ bundle.last_error }}</span>{% else %}&mdash;{% endif %}</td>
+            <td class="text-end">
+              <form method="post" action="{% url 'plugins:netbox_custom_objects:bundle_toggle' name=bundle.name %}">
+                {% csrf_token %}
+                {% if bundle.enabled %}
+                  <button type="submit" class="btn btn-sm btn-outline-danger">{% trans "Disable" %}</button>
+                {% else %}
+                  <button type="submit" class="btn btn-sm btn-primary">{% trans "Enable" %}</button>
+                {% endif %}
+              </form>
+              {% if bundle.restart_required %}
+                <div class="small text-warning mt-1 text-end">
+                  <i class="mdi mdi-restart-alert"></i>
+                  {% trans "Restart NetBox workers to apply this change." %}
+                </div>
+              {% endif %}
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="text-muted">{% trans "No bundles found." %}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}
