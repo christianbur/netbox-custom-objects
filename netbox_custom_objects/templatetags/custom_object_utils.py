@@ -1,14 +1,19 @@
+import json
+
+import yaml
 from django import template
 from extras.choices import CustomFieldTypeChoices, CustomFieldUIVisibleChoices
 
 from netbox_custom_objects.models import CustomObjectTypeField
 
 __all__ = (
-    "get_field_object_type",
-    "get_field_type_verbose_name",
-    "get_field_value",
-    "get_field_is_ui_visible",
-    "get_child_relations",
+    'format_json',
+    'format_yaml',
+    'get_field_object_type',
+    'get_field_type_verbose_name',
+    'get_field_value',
+    'get_field_is_ui_visible',
+    'get_child_relations',
 )
 
 register = template.Library()
@@ -16,7 +21,21 @@ register = template.Library()
 custom_field_type_verbose_names = {c[0]: c[1] for c in CustomFieldTypeChoices.CHOICES}
 
 
-@register.filter(name="get_field_object_type")
+@register.filter(name='format_json')
+def format_json(value) -> str:
+    if value in (None, ''):
+        return ''
+    return json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True)
+
+
+@register.filter(name='format_yaml')
+def format_yaml(value) -> str:
+    if value in (None, ''):
+        return ''
+    return yaml.dump(value, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+
+@register.filter(name='get_field_object_type')
 def get_field_object_type(field: CustomObjectTypeField) -> str:
     return field.related_object_type_label
 

@@ -449,6 +449,7 @@ def _phase1_cots(ordered_diffs, type_defs_by_slug) -> dict:
                 verbose_name_plural=type_def.get("verbose_name_plural", ""),
                 description=type_def.get("description", ""),
                 group_name=type_def.get("group_name", ""),
+                metadata=type_def.get("metadata"),
             )
             cot.save()
             logger.info("Created new COT %r (slug=%r)", cot.name, cot.slug)

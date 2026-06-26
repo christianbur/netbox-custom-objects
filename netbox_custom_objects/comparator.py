@@ -282,6 +282,12 @@ def _compare_cot_attrs(cot, type_def: dict) -> dict[str, tuple]:
         schema_val = type_def.get(attr) or ""
         if db_val != schema_val:
             changes[attr] = (db_val, schema_val)
+
+    db_metadata = cot.metadata
+    schema_metadata = type_def.get("metadata")
+    if db_metadata != schema_metadata:
+        changes["metadata"] = (db_metadata, schema_metadata)
+
     return changes
 
 

@@ -332,6 +332,7 @@ class CustomObjectTypeSerializer(NetBoxModelSerializer):
             "version",
             "group_name",
             "description",
+            "metadata",
             "tags",
             "created",
             "last_updated",

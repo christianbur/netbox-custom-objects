@@ -7,6 +7,8 @@ from netbox.forms import (NetBoxModelBulkEditForm, NetBoxModelFilterSetForm,
 from utilities.forms.fields import (CommentField, ContentTypeChoiceField,
                                     ContentTypeMultipleChoiceField,
                                     DynamicModelChoiceField, SlugField, TagFilterField)
+
+from netbox_custom_objects.form_fields import JSONOrYAMLField
 from utilities.forms.rendering import FieldSet
 from utilities.forms.utils import get_field_value
 from utilities.object_types import object_type_name
@@ -55,20 +57,25 @@ class CustomObjectTypeForm(NetBoxModelForm):
             "\"/plugins/custom-objects/vendor-policies/\""
         ),
     )
+    metadata = JSONOrYAMLField(
+        required=False,
+        require_mapping=True,
+        label=_("Metadata"),
+        help_text=_("Optional structured metadata as JSON or YAML."),
+    )
 
     fieldsets = (
         FieldSet(
             "name", "verbose_name", "verbose_name_plural", "slug",
-            "version", "description", "group_name", "tags",
+            "version", "description", "group_name", "tags", "metadata",
         ),
     )
-    comments = CommentField()
 
     class Meta:
         model = CustomObjectType
         fields = (
             "name", "verbose_name", "verbose_name_plural", "slug", "version", "description",
-            "group_name", "comments", "tags",
+            "group_name", "metadata", "tags",
         )
 
 

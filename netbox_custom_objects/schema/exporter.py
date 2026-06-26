@@ -191,6 +191,8 @@ def export_cot(cot) -> dict:
         result["description"] = cot.description
     if cot.group_name:
         result["group_name"] = cot.group_name
+    if cot.metadata is not None:
+        result["metadata"] = cot.metadata
 
     # Active + deprecated fields, ordered by schema_id for stable output.
     exported_fields = []

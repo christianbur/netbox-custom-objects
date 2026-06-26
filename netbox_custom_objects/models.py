@@ -1018,6 +1018,12 @@ class CustomObjectType(NetBoxModel):
         verbose_name=_('comments'),
         blank=True
     )
+    metadata = models.JSONField(
+        verbose_name=_('Metadata'),
+        null=True,
+        blank=True,
+        help_text=_('Optional structured metadata as JSON or YAML.'),
+    )
     version = models.CharField(max_length=50, blank=True, validators=[validate_pep440])
     verbose_name = models.CharField(max_length=100, blank=True)
     verbose_name_plural = models.CharField(max_length=100, blank=True)

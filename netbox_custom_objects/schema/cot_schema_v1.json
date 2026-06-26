@@ -321,6 +321,10 @@
         "verbose_name_plural": { "type": "string", "maxLength": 100 },
         "description": { "type": "string", "maxLength": 200 },
         "group_name": { "type": "string", "maxLength": 100 },
+        "metadata": {
+          "type": ["object", "null"],
+          "description": "Structured metadata (JSON or YAML)"
+        },
         "fields": {
           "type": "array",
           "items": { "$ref": "#/$defs/field" },

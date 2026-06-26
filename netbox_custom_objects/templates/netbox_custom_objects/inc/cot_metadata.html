@@ -1,0 +1,13 @@
+{% load i18n %}
+{% load custom_object_utils %}
+
+<div class="card">
+  <h2 class="card-header">{% trans "Metadata" %}</h2>
+  <div class="card-body">
+    {% if object.metadata %}
+      <pre class="font-monospace mb-0">{{ object.metadata|format_yaml }}</pre>
+    {% else %}
+      <span class="text-muted">{% trans "None" %}</span>
+    {% endif %}
+  </div>
+</div>

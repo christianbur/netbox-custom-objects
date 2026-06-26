@@ -23,6 +23,7 @@ does not need access to the originating NetBox instance to understand or validat
       "verbose_name": "Circuit",
       "verbose_name_plural": "Circuits",
       "description": "WAN circuit inventory",
+      "metadata": {"source": "design-doc", "owner": "network-team"},
       "fields": [
         { "id": 1, "name": "carrier", "type": "text", "required": true },
         { "id": 2, "name": "bandwidth_mbps", "type": "integer", "validation_minimum": 0 }
@@ -161,6 +162,7 @@ validate incoming documents before any DB access.
 | `version` | no | [PEP 440](https://peps.python.org/pep-0440/) version string for the schema (e.g. `"2.1.0"`). |
 | `description` | no | Short description (max 200 characters). |
 | `group_name` | no | Navigation menu grouping. |
+| `metadata` | no | Metadata (JSON or YAML object). |
 | `fields` | yes | Array of active field definitions. |
 | `removed_fields` | no | Array of tombstone records for previously removed fields. |
 
