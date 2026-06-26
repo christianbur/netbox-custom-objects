@@ -90,24 +90,24 @@ class CustomObjectTypeMetadataViewTestCase(CustomObjectsTestCase, TestCase):
         self.client = Client()
         self.client.force_login(self.user)
 
-    def test_detail_view_shows_metadata_panel(self):
+    def test_detail_view_shows_metadata_and_comments_panels(self):
         url = reverse('plugins:netbox_custom_objects:customobjecttype', kwargs={'pk': self.cot.pk})
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, '>Metadata</h2>')
         self.assertContains(response, 'panel: security')
-        self.assertNotContains(response, '>Comments</h2>')
+        self.assertContains(response, '>Comments</h2>')
 
-    def test_edit_view_shows_metadata_without_fieldset_group(self):
+    def test_edit_view_shows_metadata_and_comments_without_duplication(self):
         url = reverse('plugins:netbox_custom_objects:customobjecttype_edit', kwargs={'pk': self.cot.pk})
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
         content = response.content.decode()
         self.assertEqual(content.count('name="metadata"'), 1)
+        self.assertEqual(content.count('name="comments"'), 1)
         self.assertContains(response, 'Metadata')
         self.assertNotContains(response, 'Comments &amp; Metadata')
         self.assertNotContains(response, '>Metadata</h2>')
-        self.assertEqual(content.count('>Comments</'), 0)
 
     def test_edit_view_persists_yaml_metadata(self):
         url = reverse('plugins:netbox_custom_objects:customobjecttype_edit', kwargs={'pk': self.cot.pk})

@@ -70,12 +70,13 @@ class CustomObjectTypeForm(NetBoxModelForm):
             "version", "description", "group_name", "tags", "metadata",
         ),
     )
+    comments = CommentField()
 
     class Meta:
         model = CustomObjectType
         fields = (
             "name", "verbose_name", "verbose_name_plural", "slug", "version", "description",
-            "group_name", "metadata", "tags",
+            "group_name", "metadata", "comments", "tags",
         )
 
 
